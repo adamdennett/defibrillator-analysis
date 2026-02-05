@@ -8,6 +8,8 @@ format: html
 
 This document maps the locations of Automated External Defibrillators (AEDs) across the UK. The data is sourced from [The Circuit](https://www.defibfinder.uk/) and contains over 116,000 defibrillator records.
 
+Points are coloured by **availability** (blue = 24/7, orange = Varied) and shaded by **access type** (darker = Public, lighter = Restricted).
+
 ## Load Libraries and Data
 
 ```{r}
@@ -19,6 +21,7 @@ library(readxl)
 library(sf)
 library(dplyr)
 library(leaflet)
+library(htmltools)
 
 defib <- read_excel("defibrillator_data.xlsx",
                      sheet = "data_extract_2026-02-02")
@@ -39,6 +42,40 @@ defib_clean <- defib %>%
 defib_sf <- st_as_sf(defib_clean, coords = c("long", "lat"), crs = 4326)
 ```
 
+## Assign Colours
+
+```{r}
+#| label: colour-mapping
+
+# Colour scheme:
+#   24/7 Access + Public     -> dark blue   (#08519c)
+#   24/7 Access + Restricted -> light blue  (#6baed6)
+#   Varied Access + Public   -> dark orange (#d94701)
+#   Varied Access + Restricted -> light orange (#fdae6b)
+
+defib_sf <- defib_sf %>%
+  mutate(
+    point_colour = case_when(
+      defibrillators_availability == "24/7 Access" &
+        defibrillators_access_type == "Public"     ~ "#08519c",
+      defibrillators_availability == "24/7 Access" &
+        defibrillators_access_type == "Restricted" ~ "#6baed6",
+      defibrillators_availability == "Varied Access" &
+        defibrillators_access_type == "Public"     ~ "#d94701",
+      defibrillators_availability == "Varied Access" &
+        defibrillators_access_type == "Restricted" ~ "#fdae6b",
+      TRUE ~ "#999999"
+    )
+  )
+
+# Summary of colour categories
+defib_sf %>%
+  st_drop_geometry() %>%
+  count(defibrillators_availability, defibrillators_access_type, point_colour,
+        name = "count") %>%
+  arrange(desc(count))
+```
+
 ## Interactive Map
 
 ```{r}
@@ -48,10 +85,9 @@ leaflet(defib_sf) %>%
   addProviderTiles(providers$CartoDB.Positron) %>%
   addCircleMarkers(
     radius = 3,
-    color = "#e41a1c",
+    color = ~point_colour,
     stroke = FALSE,
     fillOpacity = 0.6,
-    clusterOptions = markerClusterOptions(),
     popup = ~paste0(
       "<strong>", location_name, "</strong><br>",
       address_line1, "<br>",
@@ -59,5 +95,13 @@ leaflet(defib_sf) %>%
       "<em>Availability:</em> ", defibrillators_availability, "<br>",
       "<em>Access:</em> ", defibrillators_access_type
     )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#08519c", "#6baed6", "#d94701", "#fdae6b"),
+    labels = c("24/7 — Public", "24/7 — Restricted",
+               "Varied — Public", "Varied — Restricted"),
+    title = "Availability — Access",
+    opacity = 0.8
   )
 ```

@@ -1,0 +1,44 @@
+[
+  {
+    "objectID": "defibrillator_map.html",
+    "href": "defibrillator_map.html",
+    "title": "UK Defibrillator Locations",
+    "section": "",
+    "text": "This document maps the locations of Automated External Defibrillators (AEDs) across the UK. The data is sourced from The Circuit and contains over 116,000 defibrillator records.\nPoints are coloured by availability (blue = 24/7, orange = Varied) and shaded by access type (darker = Public, lighter = Restricted)."
+  },
+  {
+    "objectID": "defibrillator_map.html#introduction",
+    "href": "defibrillator_map.html#introduction",
+    "title": "UK Defibrillator Locations",
+    "section": "",
+    "text": "This document maps the locations of Automated External Defibrillators (AEDs) across the UK. The data is sourced from The Circuit and contains over 116,000 defibrillator records.\nPoints are coloured by availability (blue = 24/7, orange = Varied) and shaded by access type (darker = Public, lighter = Restricted)."
+  },
+  {
+    "objectID": "defibrillator_map.html#load-libraries-and-data",
+    "href": "defibrillator_map.html#load-libraries-and-data",
+    "title": "UK Defibrillator Locations",
+    "section": "Load Libraries and Data",
+    "text": "Load Libraries and Data\n\nlibrary(readxl)\nlibrary(sf)\nlibrary(dplyr)\nlibrary(leaflet)\nlibrary(htmltools)\n\ndefib &lt;- read_excel(\"defibrillator_data.xlsx\",\n                     sheet = \"data_extract_2026-02-02\")\n\nglimpse(defib)\n\nRows: 116,027\nColumns: 17\n$ unique_identifier           &lt;chr&gt; \"CD83C127-C680-40C2-AB36-ADEB00B751D3\", \"F…\n$ location_name               &lt;chr&gt; \"Aberdeen City Council\", \"Scottish Courts …\n$ address_line1               &lt;chr&gt; \"Agricola Street\", \"Aberdeen Civil Justice…\n$ address_line2               &lt;chr&gt; \"Milltimber\", \"Queen Street\", \"2 St Nichol…\n$ address_line3               &lt;chr&gt; \"NA\", \"NA\", \"NA\", \"NA\", NA, \"NA\", NA, \"NA\"…\n$ address_city                &lt;chr&gt; \"Aberdeen\", \"Aberdeen\", \"Aberdeen\", \"Aberd…\n$ address_county              &lt;chr&gt; \"NA\", \"Aberdeenshire\", \"Aberdeenshire\", \"A…\n$ address_post_code           &lt;chr&gt; \"AB1 0JH\", \"AB10 1AQ\", \"AB10 1BU\", \"AB10 1…\n$ country                     &lt;chr&gt; \"Scotland\", \"Scotland\", \"Scotland\", \"Scotl…\n$ ladnm                       &lt;chr&gt; \"Aberdeen City\", \"Aberdeen City\", \"Aberdee…\n$ lsoa21                      &lt;chr&gt; \"S01006515\", \"S01006586\", \"S01006646\", \"S0…\n$ lsoa21nm                    &lt;chr&gt; NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA…\n$ defibrillators_availability &lt;chr&gt; \"Varied Access\", \"Varied Access\", \"24/7 Ac…\n$ defibrillators_access_type  &lt;chr&gt; \"Public\", \"Public\", \"Public\", \"Public\", \"P…\n$ lat                         &lt;chr&gt; \"57.111269999999998\", \"57.1488941\", \"57.14…\n$ long                        &lt;dbl&gt; -2.230140, -2.095454, -2.097835, -2.107368…\n$ county                      &lt;lgl&gt; NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA…"
+  },
+  {
+    "objectID": "defibrillator_map.html#clean-and-convert-to-spatial-data",
+    "href": "defibrillator_map.html#clean-and-convert-to-spatial-data",
+    "title": "UK Defibrillator Locations",
+    "section": "Clean and Convert to Spatial Data",
+    "text": "Clean and Convert to Spatial Data\n\n# Remove rows with missing coordinates\ndefib_clean &lt;- defib %&gt;%\n  filter(!is.na(lat), !is.na(long))\n\n# Convert to sf object\ndefib_sf &lt;- st_as_sf(defib_clean, coords = c(\"long\", \"lat\"), crs = 4326)"
+  },
+  {
+    "objectID": "defibrillator_map.html#assign-colours",
+    "href": "defibrillator_map.html#assign-colours",
+    "title": "UK Defibrillator Locations",
+    "section": "Assign Colours",
+    "text": "Assign Colours\n\n# Colour scheme:\n#   24/7 Access + Public     -&gt; dark blue   (#08519c)\n#   24/7 Access + Restricted -&gt; light blue  (#6baed6)\n#   Varied Access + Public   -&gt; dark orange (#d94701)\n#   Varied Access + Restricted -&gt; light orange (#fdae6b)\n\ndefib_sf &lt;- defib_sf %&gt;%\n  mutate(\n    point_colour = case_when(\n      defibrillators_availability == \"24/7 Access\" &\n        defibrillators_access_type == \"Public\"     ~ \"#08519c\",\n      defibrillators_availability == \"24/7 Access\" &\n        defibrillators_access_type == \"Restricted\" ~ \"#6baed6\",\n      defibrillators_availability == \"Varied Access\" &\n        defibrillators_access_type == \"Public\"     ~ \"#d94701\",\n      defibrillators_availability == \"Varied Access\" &\n        defibrillators_access_type == \"Restricted\" ~ \"#fdae6b\",\n      TRUE ~ \"#999999\"\n    )\n  )\n\n# Summary of colour categories\ndefib_sf %&gt;%\n  st_drop_geometry() %&gt;%\n  count(defibrillators_availability, defibrillators_access_type, point_colour,\n        name = \"count\") %&gt;%\n  arrange(desc(count))\n\n# A tibble: 4 × 4\n  defibrillators_availability defibrillators_access_type point_colour count\n  &lt;chr&gt;                       &lt;chr&gt;                      &lt;chr&gt;        &lt;int&gt;\n1 24/7 Access                 Public                     #08519c      62618\n2 Varied Access               Restricted                 #fdae6b      30046\n3 Varied Access               Public                     #d94701      17766\n4 24/7 Access                 Restricted                 #6baed6       5597"
+  },
+  {
+    "objectID": "defibrillator_map.html#interactive-map",
+    "href": "defibrillator_map.html#interactive-map",
+    "title": "UK Defibrillator Locations",
+    "section": "Interactive Map",
+    "text": "Interactive Map\n\nleaflet(defib_sf) %&gt;%\n  addProviderTiles(providers$CartoDB.Positron) %&gt;%\n  addCircleMarkers(\n    radius = 3,\n    color = ~point_colour,\n    stroke = FALSE,\n    fillOpacity = 0.6,\n    popup = ~paste0(\n      \"&lt;strong&gt;\", location_name, \"&lt;/strong&gt;&lt;br&gt;\",\n      address_line1, \"&lt;br&gt;\",\n      address_city, \" \", address_post_code, \"&lt;br&gt;\",\n      \"&lt;em&gt;Availability:&lt;/em&gt; \", defibrillators_availability, \"&lt;br&gt;\",\n      \"&lt;em&gt;Access:&lt;/em&gt; \", defibrillators_access_type\n    )\n  ) %&gt;%\n  addLegend(\n    position = \"bottomright\",\n    colors = c(\"#08519c\", \"#6baed6\", \"#d94701\", \"#fdae6b\"),\n    labels = c(\"24/7 — Public\", \"24/7 — Restricted\",\n               \"Varied — Public\", \"Varied — Restricted\"),\n    title = \"Availability — Access\",\n    opacity = 0.8\n  )"
+  }
+]

@@ -9,6 +9,7 @@ _freeze/
 _site/
 /.quarto/
 
-# Rendered output
-*.html
-!README.html
+# Rendered output (not docs/ — needed for GitHub Pages)
+/.quarto/
+
+**/*.quarto_ipynb

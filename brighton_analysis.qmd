@@ -1,0 +1,375 @@
+---
+title: "Brighton & Hove: Defibrillator Provision vs. Daytime Demand"
+author: "Adam Dennett"
+format: html
+---
+
+## Introduction
+
+This analysis compares the current provision of **24/7 publicly accessible** Automated External Defibrillators (AEDs) in Brighton & Hove against estimated daytime population demand. Using Census 2021 workday population density at Lower Super Output Area (LSOA) level as a proxy for where people are during the day, we identify areas with high demand but low defibrillator coverage — and rank them by priority for new AED placement.
+
+**Data sources:**
+
+- AED locations from [The Circuit](https://www.defibfinder.uk/) (February 2026 extract)
+- Census 2021 Workday Population Density (table WD001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_wd)
+- LSOA 2021 boundaries from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
+
+## Load Libraries
+
+```{r}
+#| label: libraries
+#| message: false
+#| warning: false
+
+library(readxl)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(leaflet)
+library(tmap)
+library(classInt)
+library(htmltools)
+library(knitr)
+library(kableExtra)
+```
+
+## Load and Filter Defibrillator Data
+
+```{r}
+#| label: load-defib
+#| message: false
+
+# Load full dataset
+defib <- read_excel("defibrillator_data.xlsx",
+                     sheet = "data_extract_2026-02-02")
+
+# Filter to Brighton & Hove
+bh_defib <- defib %>%
+  filter(grepl("Brighton", ladnm, ignore.case = TRUE),
+         !is.na(lat), !is.na(long))
+
+cat("Total AEDs in Brighton & Hove:", nrow(bh_defib), "\n")
+
+# Summary by availability and access type
+bh_defib %>%
+  count(defibrillators_availability, defibrillators_access_type,
+        name = "count") %>%
+  arrange(desc(count)) %>%
+  kable(col.names = c("Availability", "Access Type", "Count")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+```{r}
+#| label: filter-247-public
+
+# Filter to 24/7 public access defibrillators only
+bh_247_public <- bh_defib %>%
+  filter(defibrillators_availability == "24/7 Access",
+         defibrillators_access_type == "Public")
+
+cat("24/7 Public AEDs in Brighton & Hove:", nrow(bh_247_public), "\n")
+
+# Convert to spatial
+bh_247_sf <- st_as_sf(bh_247_public, coords = c("long", "lat"), crs = 4326)
+
+# Also create sf for ALL B&H defibrillators (for context)
+bh_all_sf <- st_as_sf(bh_defib, coords = c("long", "lat"), crs = 4326)
+```
+
+## Download External Data
+
+### LSOA 2021 Boundaries
+
+```{r}
+#| label: download-boundaries
+#| message: false
+
+# Download Brighton & Hove LSOA boundaries from ONS ArcGIS FeatureServer
+# Using the BSC (Super Generalised Clipped) version for web mapping
+api_url <- paste0(
+  "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/",
+  "Lower_layer_Super_Output_Areas_December_2021_Boundaries_EW_BSC_V4/",
+  "FeatureServer/0/query?",
+  "where=LSOA21NM+LIKE+%27Brighton%25%27",
+  "&outFields=LSOA21CD,LSOA21NM",
+  "&returnGeometry=true",
+  "&outSR=4326",
+  "&f=geojson",
+  "&resultRecordCount=200"
+)
+
+# Download to temp file and read
+tmp_geojson <- tempfile(fileext = ".geojson")
+download.file(api_url, tmp_geojson, quiet = TRUE, mode = "wb")
+bh_lsoa <- st_read(tmp_geojson, quiet = TRUE)
+
+cat("LSOA boundaries loaded:", nrow(bh_lsoa), "LSOAs\n")
+```
+
+### Census 2021 Workday Population Density (WD001)
+
+```{r}
+#| label: download-wd001
+#| message: false
+
+# Download WD001 from Nomis
+tmp_zip <- tempfile(fileext = ".zip")
+download.file("https://www.nomisweb.co.uk/output/census/2021/wd001.zip",
+              tmp_zip, quiet = TRUE, mode = "wb")
+
+# Extract and read the LSOA-level CSV
+tmp_dir <- tempdir()
+unzip(tmp_zip, exdir = tmp_dir)
+
+wd001 <- read_csv(file.path(tmp_dir, "WD001_lsoa.csv"),
+                   show_col_types = FALSE)
+
+# Rename columns for easier use
+wd001 <- wd001 %>%
+  rename(
+    lsoa21cd = `Lower layer Super Output Areas Code`,
+    lsoa21nm = `Lower layer Super Output Areas Label`,
+    workday_density = `Population Density`
+  )
+
+# Filter to Brighton & Hove LSOAs
+bh_wd001 <- wd001 %>%
+  filter(lsoa21cd %in% bh_lsoa$LSOA21CD)
+
+cat("Workday density data for", nrow(bh_wd001), "Brighton & Hove LSOAs\n")
+cat("Range:", round(min(bh_wd001$workday_density)),
+    "to", round(max(bh_wd001$workday_density)),
+    "persons per km²\n")
+```
+
+## Build Analysis Dataset
+
+```{r}
+#| label: build-dataset
+
+# Count 24/7 public AEDs per LSOA
+aed_counts <- bh_247_public %>%
+  count(lsoa21, name = "aed_count")
+
+# Join workday density to LSOA boundaries
+bh_analysis <- bh_lsoa %>%
+  left_join(bh_wd001, by = c("LSOA21CD" = "lsoa21cd")) %>%
+  left_join(aed_counts, by = c("LSOA21CD" = "lsoa21")) %>%
+  mutate(
+    aed_count = replace_na(aed_count, 0),
+    # Priority score: higher workday density with fewer AEDs = higher priority
+    priority_score = workday_density / (aed_count + 1),
+    priority_rank = rank(-priority_score, ties.method = "first")
+  )
+
+cat("LSOAs with zero 24/7 public AEDs:",
+    sum(bh_analysis$aed_count == 0), "of", nrow(bh_analysis), "\n")
+```
+
+## Map 1: Workday Population Demand with AED Locations
+
+This map shows the Census 2021 workday population density across Brighton & Hove LSOAs. Darker shading indicates higher concentrations of people during the working day. Red points show the locations of existing 24/7 publicly accessible defibrillators.
+
+```{r}
+#| label: map-demand
+#| fig-width: 10
+#| fig-height: 8
+
+tmap_mode("plot")
+
+tm_shape(bh_analysis) +
+  tm_polygons(
+    fill = "workday_density",
+    fill.scale = tm_scale_continuous(
+      values = "brewer.blues"
+    ),
+    fill.legend = tm_legend(
+      title = "Workday Pop.\nDensity\n(per km²)"
+    ),
+    col = "grey60",
+    lwd = 0.5
+  ) +
+  tm_shape(bh_247_sf) +
+  tm_symbols(
+    fill = "red",
+    col = "darkred",
+    size = 0.3,
+    shape = 21
+  ) +
+  tm_title("Workday Population Demand & 24/7 Public AED Locations") +
+  tm_layout(
+    frame = FALSE
+  ) +
+  tm_scalebar(position = c("left", "bottom"))
+```
+
+## Map 2: Interactive Demand & Provision Map
+
+Zoom in to explore individual LSOAs and AED locations. Click on LSOAs for workday population data, or on red markers for AED details.
+
+```{r}
+#| label: map-interactive
+
+# Create colour palette for workday density
+pal_density <- colorNumeric("Blues", domain = bh_analysis$workday_density)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # Choropleth layer
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_density(workday_density),
+    fillOpacity = 0.6,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count, "<br>",
+      "<em>Priority rank:</em> ", priority_rank, " of ", nrow(bh_analysis)
+    ),
+    group = "Workday Density"
+  ) %>%
+  # AED point markers
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_density,
+    values = bh_analysis$workday_density,
+    title = "Workday Density<br>(per km²)"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Workday Density", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+## Map 3: Coverage Gap — Priority Areas for New AEDs
+
+The priority score is calculated as: **workday population density ÷ (number of existing 24/7 public AEDs + 1)**. A higher score indicates an LSOA with high daytime demand but few or no defibrillators — and therefore greater need for new provision.
+
+LSOAs outlined in red are the **top 20 priority** areas.
+
+```{r}
+#| label: map-priority
+#| fig-width: 10
+#| fig-height: 8
+
+# Flag top 20 priority LSOAs
+bh_analysis <- bh_analysis %>%
+  mutate(top20 = priority_rank <= 20)
+
+tmap_mode("plot")
+
+tm_shape(bh_analysis) +
+  tm_polygons(
+    fill = "priority_score",
+    fill.scale = tm_scale_continuous(
+      values = "brewer.yl_or_rd"
+    ),
+    fill.legend = tm_legend(
+      title = "Priority\nScore"
+    ),
+    col = "grey60",
+    lwd = 0.5
+  ) +
+  # Highlight top 20
+  tm_shape(bh_analysis %>% filter(top20)) +
+  tm_borders(col = "red", lwd = 2) +
+  # Existing AEDs
+  tm_shape(bh_247_sf) +
+  tm_symbols(
+    fill = "black",
+    col = "white",
+    size = 0.25,
+    shape = 21
+  ) +
+  tm_title("Priority Areas for New 24/7 Public AEDs") +
+  tm_layout(
+    frame = FALSE
+  ) +
+  tm_scalebar(position = c("left", "bottom"))
+```
+
+## Priority Ranking Table
+
+The table below ranks all Brighton & Hove LSOAs by priority for new 24/7 public defibrillator placement. LSOAs with high workday population density but few or no existing AEDs are ranked highest.
+
+```{r}
+#| label: priority-table
+
+priority_table <- bh_analysis %>%
+  st_drop_geometry() %>%
+  select(
+    Rank = priority_rank,
+    LSOA = LSOA21NM,
+    `Workday Density (per km²)` = workday_density,
+    `24/7 Public AEDs` = aed_count,
+    `Priority Score` = priority_score
+  ) %>%
+  arrange(Rank) %>%
+  mutate(
+    `Workday Density (per km²)` = format(round(`Workday Density (per km²)`),
+                                          big.mark = ","),
+    `Priority Score` = format(round(`Priority Score`), big.mark = ",")
+  )
+
+# Show top 20
+priority_table %>%
+  head(20) %>%
+  kable(align = c("r", "l", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Full Ranking
+
+```{r}
+#| label: full-table
+
+priority_table %>%
+  kable(align = c("r", "l", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE) %>%
+  scroll_box(height = "400px")
+```
+
+## Summary
+
+```{r}
+#| label: summary-stats
+#| echo: false
+
+n_total <- nrow(bh_analysis)
+n_zero <- sum(bh_analysis$aed_count == 0)
+n_aeds <- nrow(bh_247_sf)
+top1 <- bh_analysis %>% filter(priority_rank == 1) %>% st_drop_geometry()
+```
+
+**Key findings:**
+
+- Brighton & Hove has **`r n_total` LSOAs** and **`r n_aeds` 24/7 publicly accessible AEDs**
+- **`r n_zero` LSOAs (`r round(100 * n_zero / n_total)`%)** have **no** 24/7 public AED
+- The highest-priority LSOA for new provision is **`r top1$LSOA21NM`** with a workday population density of `r format(round(top1$workday_density), big.mark = ",")` persons per km² and `r top1$aed_count` existing 24/7 public AED(s)
+- The priority ranking combines both demand (workday population density) and existing supply, meaning LSOAs that already have good coverage are ranked lower regardless of their density
+
+---
+
+*Data sourced from [The Circuit](https://www.defibfinder.uk/) and [ONS Census 2021](https://www.nomisweb.co.uk/sources/census_2021_wd). Is this an emergency? This website is used to locate defibrillators, but it is not intended for use in an emergency. If you require urgent medical assistance, call 999 now.*

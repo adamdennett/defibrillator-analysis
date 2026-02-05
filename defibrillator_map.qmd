@@ -1,0 +1,63 @@
+---
+title: "UK Defibrillator Locations"
+author: "Adam Dennett"
+format: html
+---
+
+## Introduction
+
+This document maps the locations of Automated External Defibrillators (AEDs) across the UK. The data is sourced from [The Circuit](https://www.defibfinder.uk/) and contains over 116,000 defibrillator records.
+
+## Load Libraries and Data
+
+```{r}
+#| label: load-data
+#| message: false
+#| warning: false
+
+library(readxl)
+library(sf)
+library(dplyr)
+library(leaflet)
+
+defib <- read_excel("defibrillator_data.xlsx",
+                     sheet = "data_extract_2026-02-02")
+
+glimpse(defib)
+```
+
+## Clean and Convert to Spatial Data
+
+```{r}
+#| label: spatial-convert
+
+# Remove rows with missing coordinates
+defib_clean <- defib %>%
+  filter(!is.na(lat), !is.na(long))
+
+# Convert to sf object
+defib_sf <- st_as_sf(defib_clean, coords = c("long", "lat"), crs = 4326)
+```
+
+## Interactive Map
+
+```{r}
+#| label: leaflet-map
+
+leaflet(defib_sf) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    radius = 3,
+    color = "#e41a1c",
+    stroke = FALSE,
+    fillOpacity = 0.6,
+    clusterOptions = markerClusterOptions(),
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code, "<br>",
+      "<em>Availability:</em> ", defibrillators_availability, "<br>",
+      "<em>Access:</em> ", defibrillators_access_type
+    )
+  )
+```

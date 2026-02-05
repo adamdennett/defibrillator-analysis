@@ -2,6 +2,9 @@
 title: "UK Defibrillator Locations"
 author: "Adam Dennett"
 format: html
+execute:
+  warning: false
+  message: false
 ---
 
 ## Introduction

@@ -2,6 +2,9 @@
 title: "Brighton & Hove: Defibrillator Provision vs. Daytime Demand"
 author: "Adam Dennett"
 format: html
+execute:
+  warning: false
+  message: false
 ---
 
 ## Introduction

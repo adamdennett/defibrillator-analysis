@@ -15,7 +15,8 @@ This analysis compares the current provision of **24/7 publicly accessible** Aut
 
 - AED locations from [The Circuit](https://www.defibfinder.uk/) (February 2026 extract)
 - Census 2021 Workday Population Density (table WD001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_wd)
-- LSOA 2021 boundaries from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
+- LSOA 2021 boundaries (BGC V5, Generalised Clipped) from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
+- Telephone box locations from [OpenStreetMap](https://www.openstreetmap.org/) via the Overpass API
 
 ## Load Libraries
 
@@ -35,6 +36,7 @@ library(classInt)
 library(htmltools)
 library(knitr)
 library(kableExtra)
+library(jsonlite)
 ```
 
 ## Load and Filter Defibrillator Data
@@ -89,10 +91,10 @@ bh_all_sf <- st_as_sf(bh_defib, coords = c("long", "lat"), crs = 4326)
 #| message: false
 
 # Download Brighton & Hove LSOA boundaries from ONS ArcGIS FeatureServer
-# Using the BSC (Super Generalised Clipped) version for web mapping
+# Using the BGC (Generalised Clipped) V5 version for higher-quality boundaries
 api_url <- paste0(
   "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/",
-  "Lower_layer_Super_Output_Areas_December_2021_Boundaries_EW_BSC_V4/",
+  "Lower_layer_Super_Output_Areas_December_2021_Boundaries_EW_BGC_V5/",
   "FeatureServer/0/query?",
   "where=LSOA21NM+LIKE+%27Brighton%25%27",
   "&outFields=LSOA21CD,LSOA21NM",
@@ -144,6 +146,33 @@ cat("Workday density data for", nrow(bh_wd001), "Brighton & Hove LSOAs\n")
 cat("Range:", round(min(bh_wd001$workday_density)),
     "to", round(max(bh_wd001$workday_density)),
     "persons per km²\n")
+```
+
+### OpenStreetMap Telephone Box Locations
+
+Telephone boxes are potential sites for new defibrillator installations — many across the UK have already been converted. We download current telephone box locations from [OpenStreetMap](https://www.openstreetmap.org/) via the Overpass API (`amenity=telephone`).
+
+```{r}
+#| label: download-phone-boxes
+
+# Query OSM Overpass API for telephone boxes in Brighton & Hove
+# Use a bounding box around Brighton & Hove to avoid URL encoding issues
+# with area names. B&H bbox: south=50.79, west=-0.30, north=50.89, east=-0.04
+overpass_query <- '[out:json][timeout:30];node[amenity=telephone](50.79,-0.30,50.89,-0.04);out body;'
+overpass_url <- paste0(
+  "https://overpass-api.de/api/interpreter?data=",
+  URLencode(overpass_query, reserved = TRUE)
+)
+
+osm_raw <- fromJSON(overpass_url)
+
+phone_boxes <- osm_raw$elements %>%
+  select(id, lat, lon) %>%
+  filter(!is.na(lat), !is.na(lon))
+
+phone_sf <- st_as_sf(phone_boxes, coords = c("lon", "lat"), crs = 4326)
+
+cat("Telephone boxes loaded from OSM:", nrow(phone_sf), "\n")
 ```
 
 ## Build Analysis Dataset
@@ -266,47 +295,64 @@ leaflet() %>%
 
 The priority score is calculated as: **workday population density ÷ (number of existing 24/7 public AEDs + 1)**. A higher score indicates an LSOA with high daytime demand but few or no defibrillators — and therefore greater need for new provision.
 
-LSOAs outlined in red are the **top 20 priority** areas.
+LSOAs outlined in red are the **top 20 priority** areas. Click on any LSOA for details.
 
 ```{r}
 #| label: map-priority
-#| fig-width: 10
-#| fig-height: 8
 
 # Flag top 20 priority LSOAs
 bh_analysis <- bh_analysis %>%
   mutate(top20 = priority_rank <= 20)
 
-tmap_mode("plot")
+# Colour palette for priority score
+pal_priority <- colorNumeric("YlOrRd", domain = bh_analysis$priority_score)
 
-tm_shape(bh_analysis) +
-  tm_polygons(
-    fill = "priority_score",
-    fill.scale = tm_scale_continuous(
-      values = "brewer.yl_or_rd"
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # All LSOAs coloured by priority score
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_priority(priority_score),
+    fillOpacity = 0.6,
+    color = ~ifelse(top20, "red", "grey50"),
+    weight = ~ifelse(top20, 3, 1),
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Priority rank:</em> <strong>", priority_rank,
+      "</strong> of ", nrow(bh_analysis), "<br>",
+      "<em>Priority score:</em> ",
+      format(round(priority_score), big.mark = ","), "<br>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
     ),
-    fill.legend = tm_legend(
-      title = "Priority\nScore"
-    ),
-    col = "grey60",
-    lwd = 0.5
-  ) +
-  # Highlight top 20
-  tm_shape(bh_analysis %>% filter(top20)) +
-  tm_borders(col = "red", lwd = 2) +
+    group = "Priority Score"
+  ) %>%
   # Existing AEDs
-  tm_shape(bh_247_sf) +
-  tm_symbols(
-    fill = "black",
-    col = "white",
-    size = 0.25,
-    shape = 21
-  ) +
-  tm_title("Priority Areas for New 24/7 Public AEDs") +
-  tm_layout(
-    frame = FALSE
-  ) +
-  tm_scalebar(position = c("left", "bottom"))
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 4,
+    color = "black",
+    fillColor = "white",
+    fillOpacity = 0.9,
+    weight = 1.5,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_priority,
+    values = bh_analysis$priority_score,
+    title = "Priority Score"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Priority Score", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
 ```
 
 ## Priority Ranking Table
@@ -341,7 +387,91 @@ priority_table %>%
   row_spec(0, bold = TRUE)
 ```
 
-### Full Ranking
+### Full Ranking — Interactive Map
+
+This map shows all LSOAs coloured by priority rank (darker red = higher priority), with existing 24/7 public AED locations (red markers) and OpenStreetMap telephone box locations (green markers). Telephone boxes represent potential sites for new defibrillator installations.
+
+```{r}
+#| label: map-full-ranking
+
+# Colour palette: rank 1 = darkest, rank 165 = lightest
+pal_rank <- colorNumeric(
+  palette = "YlOrRd",
+  domain = bh_analysis$priority_rank,
+  reverse = TRUE
+)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # LSOAs coloured by priority rank
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_rank(priority_rank),
+    fillOpacity = 0.5,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Priority rank:</em> <strong>", priority_rank,
+      "</strong> of ", nrow(bh_analysis), "<br>",
+      "<em>Priority score:</em> ",
+      format(round(priority_score), big.mark = ","), "<br>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Priority Ranking"
+  ) %>%
+  # Existing 24/7 public AEDs
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  # OSM telephone boxes
+  addCircleMarkers(
+    data = phone_sf,
+    radius = 5,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>Telephone Box</strong><br>",
+      "<em>OSM ID:</em> ", id
+    ),
+    group = "Telephone Boxes (OSM)"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_rank,
+    values = bh_analysis$priority_rank,
+    title = "Priority Rank",
+    labFormat = labelFormat(transform = function(x) round(x))
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("red", "#2ca02c"),
+    labels = c("24/7 Public AED", "Telephone Box"),
+    title = "Points"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Priority Ranking", "24/7 Public AEDs",
+                      "Telephone Boxes (OSM)"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+### Full Ranking Table
 
 ```{r}
 #| label: full-table

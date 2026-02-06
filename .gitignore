@@ -13,3 +13,6 @@ _site/
 /.quarto/
 
 **/*.quarto_ipynb
+
+# Cached distance matrices (large, generated at runtime)
+*.rds

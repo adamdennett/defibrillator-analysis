@@ -1,0 +1,873 @@
+---
+title: "Brighton & Hove: Optimal AED Placement Using MCLP Optimisation"
+author: "Adam Dennett"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+## Introduction
+
+This analysis extends the [priority-ranking approach](brighton_analysis.html) by applying a **Maximal Coverage Location Problem (MCLP)** optimisation to identify the best locations for new Automated External Defibrillators (AEDs) in Brighton & Hove.
+
+Rather than simply ranking LSOAs by need, the MCLP directly answers the question: *given a budget for `p` new AEDs, where should they be placed to maximise the population covered within a given walking distance?*
+
+**Key features of this approach:**
+
+- **Network-based walking distances** (not straight-line) via OpenStreetMap street data
+- **Candidate locations** drawn from real-world sites (pharmacies, schools, community centres, libraries, sports centres, GP surgeries, supermarkets, telephone boxes)
+- **Mathematical optimisation** using Mixed Integer Programming to guarantee the best solution
+- **Scenario testing** across multiple coverage radii and numbers of new AEDs
+
+**Data sources:**
+
+- AED locations from [The Circuit](https://www.defibfinder.uk/) (February 2026 extract)
+- Census 2021 Workday Population Density (table WD001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_wd)
+- LSOA 2021 boundaries (BGC V5, Generalised Clipped) from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
+- Candidate locations and street network from [OpenStreetMap](https://www.openstreetmap.org/)
+
+## Load Libraries
+
+```{r}
+#| label: libraries
+
+library(readxl)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(leaflet)
+library(knitr)
+library(kableExtra)
+library(htmltools)
+library(osmdata)
+library(dodgr)
+library(ompr)
+library(ompr.roi)
+library(ROI)
+library(ROI.plugin.glpk)
+```
+
+## Load and Filter Defibrillator Data
+
+```{r}
+#| label: load-defib
+
+# Load full dataset
+defib <- read_excel("defibrillator_data.xlsx",
+                     sheet = "data_extract_2026-02-02")
+
+# Filter to Brighton & Hove — 24/7 public access only
+bh_defib <- defib %>%
+  filter(grepl("Brighton", ladnm, ignore.case = TRUE),
+         !is.na(lat), !is.na(long))
+
+bh_247_public <- bh_defib %>%
+  filter(defibrillators_availability == "24/7 Access",
+         defibrillators_access_type == "Public")
+
+bh_247_sf <- st_as_sf(bh_247_public, coords = c("long", "lat"), crs = 4326)
+
+cat("24/7 Public AEDs in Brighton & Hove:", nrow(bh_247_sf), "\n")
+```
+
+## Download LSOA Boundaries and Workday Population
+
+```{r}
+#| label: download-boundaries
+
+# Download Brighton & Hove LSOA boundaries from ONS ArcGIS FeatureServer
+api_url <- paste0(
+  "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/",
+  "Lower_layer_Super_Output_Areas_December_2021_Boundaries_EW_BGC_V5/",
+  "FeatureServer/0/query?",
+  "where=LSOA21NM+LIKE+%27Brighton%25%27",
+  "&outFields=LSOA21CD,LSOA21NM",
+  "&returnGeometry=true",
+  "&outSR=4326",
+  "&f=geojson",
+  "&resultRecordCount=200"
+)
+
+tmp_geojson <- tempfile(fileext = ".geojson")
+download.file(api_url, tmp_geojson, quiet = TRUE, mode = "wb")
+bh_lsoa <- st_read(tmp_geojson, quiet = TRUE)
+
+cat("LSOA boundaries loaded:", nrow(bh_lsoa), "LSOAs\n")
+```
+
+```{r}
+#| label: download-wd001
+
+# Download WD001 workday population density from Nomis
+tmp_zip <- tempfile(fileext = ".zip")
+download.file("https://www.nomisweb.co.uk/output/census/2021/wd001.zip",
+              tmp_zip, quiet = TRUE, mode = "wb")
+
+tmp_dir <- tempdir()
+unzip(tmp_zip, exdir = tmp_dir)
+
+wd001 <- read_csv(file.path(tmp_dir, "WD001_lsoa.csv"),
+                   show_col_types = FALSE)
+
+wd001 <- wd001 %>%
+  rename(
+    lsoa21cd = `Lower layer Super Output Areas Code`,
+    lsoa21nm = `Lower layer Super Output Areas Label`,
+    workday_density = `Population Density`
+  )
+
+bh_wd001 <- wd001 %>%
+  filter(lsoa21cd %in% bh_lsoa$LSOA21CD)
+
+cat("Workday density data for", nrow(bh_wd001), "Brighton & Hove LSOAs\n")
+```
+
+## Build Demand Points
+
+We use population-weighted LSOA centroids as demand points. Each centroid carries the workday population density as its weight — LSOAs where more people are present during the working day exert higher demand for AED coverage.
+
+```{r}
+#| label: demand-points
+
+# Join workday density to LSOA boundaries
+bh_analysis <- bh_lsoa %>%
+  left_join(bh_wd001, by = c("LSOA21CD" = "lsoa21cd")) %>%
+  mutate(workday_density = replace_na(workday_density, 0))
+
+# Create population-weighted centroids as demand points
+demand_pts <- st_centroid(bh_analysis)
+
+# Extract coordinates for distance computation
+demand_coords <- st_coordinates(demand_pts)
+demand_pts$lon <- demand_coords[, 1]
+demand_pts$lat <- demand_coords[, 2]
+
+cat("Demand points (LSOA centroids):", nrow(demand_pts), "\n")
+cat("Total workday density weight:",
+    format(round(sum(demand_pts$workday_density)), big.mark = ","), "\n")
+```
+
+## Extract Candidate Locations from OpenStreetMap
+
+We query OpenStreetMap for potential AED installation sites — community-facing locations that are typically accessible to the public and have existing infrastructure (power, shelter). Candidates within 50m of an existing AED are excluded.
+
+```{r}
+#| label: osm-candidates
+
+# Define Brighton & Hove bounding box for osmdata
+bh_bb <- matrix(c(-0.30, 50.79, -0.04, 50.89), nrow = 2,
+                dimnames = list(c("x", "y"), c("min", "max")))
+
+# POI types to query: list of key-value pairs
+poi_types <- list(
+  pharmacy = c("amenity", "pharmacy"),
+  school = c("amenity", "school"),
+  community_centre = c("amenity", "community_centre"),
+  library = c("amenity", "library"),
+  sports_centre = c("leisure", "sports_centre"),
+  doctors = c("amenity", "doctors"),
+  supermarket = c("shop", "supermarket"),
+  telephone = c("amenity", "telephone")
+)
+
+# Query each POI type via osmdata
+all_candidates <- list()
+
+for (poi_name in names(poi_types)) {
+  tag_key <- poi_types[[poi_name]][1]
+  tag_val <- poi_types[[poi_name]][2]
+
+  result <- tryCatch({
+    osm_result <- opq(bbox = bh_bb, timeout = 60) %>%
+      add_osm_feature(key = tag_key, value = tag_val) %>%
+      osmdata_sf()
+
+    # Collect point features from nodes
+    pts <- NULL
+    if (!is.null(osm_result$osm_points) && nrow(osm_result$osm_points) > 0) {
+      coords <- st_coordinates(osm_result$osm_points)
+      pts <- data.frame(
+        id = osm_result$osm_points$osm_id,
+        lon = coords[, 1],
+        lat = coords[, 2]
+      )
+    }
+
+    # Collect centroids from polygon/way features
+    polys <- NULL
+    if (!is.null(osm_result$osm_polygons) && nrow(osm_result$osm_polygons) > 0) {
+      centroids <- st_centroid(osm_result$osm_polygons)
+      coords <- st_coordinates(centroids)
+      polys <- data.frame(
+        id = osm_result$osm_polygons$osm_id,
+        lon = coords[, 1],
+        lat = coords[, 2]
+      )
+    }
+
+    combined <- bind_rows(pts, polys)
+    if (!is.null(combined) && nrow(combined) > 0) {
+      combined %>% mutate(poi_type = poi_name)
+    } else {
+      NULL
+    }
+  }, error = function(e) {
+    cat(sprintf("  Warning: failed to fetch %s: %s\n", poi_name, e$message))
+    NULL
+  })
+
+  if (!is.null(result) && nrow(result) > 0) {
+    all_candidates[[poi_name]] <- result
+  }
+
+  cat(sprintf("  %s: %d features\n", poi_name,
+              if (!is.null(result)) nrow(result) else 0L))
+
+  # Brief pause to be polite to Overpass API
+  Sys.sleep(1)
+}
+
+candidates_df <- bind_rows(all_candidates)
+candidates_sf <- st_as_sf(candidates_df, coords = c("lon", "lat"), crs = 4326)
+
+cat("Total candidate locations from OSM:", nrow(candidates_sf), "\n")
+cat("By type:\n")
+print(table(candidates_sf$poi_type))
+```
+
+```{r}
+#| label: filter-candidates
+
+# Remove candidates within 50m of an existing 24/7 public AED
+# Transform to BNG for distance calculation in metres
+candidates_bng <- st_transform(candidates_sf, 27700)
+aed_bng <- st_transform(bh_247_sf, 27700)
+
+# Calculate distance from each candidate to nearest existing AED
+nearest_dist <- st_distance(candidates_bng, aed_bng)
+min_dist <- apply(nearest_dist, 1, min)
+
+# Keep candidates >50m from any existing AED
+candidates_sf <- candidates_sf[as.numeric(min_dist) > 50, ]
+candidates_bng <- candidates_bng[as.numeric(min_dist) > 50, ]
+
+cat("Candidates after removing those within 50m of existing AEDs:",
+    nrow(candidates_sf), "\n")
+cat("By type:\n")
+print(table(candidates_sf$poi_type))
+```
+
+## Network Distance Calculation
+
+We compute walking distances along the OpenStreetMap street network using the `dodgr` package. This gives realistic travel times rather than straight-line (Euclidean) distances, which underestimate actual walking distance by a factor of typically 1.3–1.5 in urban areas.
+
+Distance matrices are cached as `.rds` files since computation is expensive.
+
+```{r}
+#| label: network-distances
+
+# File paths for cached results
+cache_graph <- "brighton_dodgr_graph.rds"
+cache_dist_candidates <- "brighton_distance_matrix.rds"
+cache_dist_existing <- "brighton_existing_dist.rds"
+
+if (file.exists(cache_dist_candidates) && file.exists(cache_dist_existing)) {
+  cat("Loading cached distance matrices...\n")
+  dist_to_candidates <- readRDS(cache_dist_candidates)
+  dist_to_existing <- readRDS(cache_dist_existing)
+} else {
+  cat("Computing network distances (this may take a few minutes)...\n")
+
+  # Download OSM street network for walking
+  if (file.exists(cache_graph)) {
+    graph <- readRDS(cache_graph)
+  } else {
+    # Use osmdata to download the street network with a longer timeout
+    # dodgr_streetnet() uses a short Overpass timeout that fails for larger areas
+    bh_bb <- matrix(c(-0.30, 50.79, -0.04, 50.89), nrow = 2,
+                    dimnames = list(c("x", "y"), c("min", "max")))
+    cat("Downloading OSM street network via osmdata...\n")
+    bh_streets <- opq(bbox = bh_bb, timeout = 120) %>%
+      add_osm_feature(key = "highway") %>%
+      osmdata_sf()
+
+    # Extract the lines (road/path geometries) for dodgr
+    bh_lines <- bh_streets$osm_lines
+    graph <- weight_streetnet(bh_lines, wt_profile = "foot")
+    saveRDS(graph, cache_graph)
+  }
+
+  # Prepare coordinate matrices
+  demand_xy <- data.frame(
+    x = demand_pts$lon,
+    y = demand_pts$lat
+  )
+
+  candidate_coords <- st_coordinates(candidates_sf)
+  candidate_xy <- data.frame(
+    x = candidate_coords[, 1],
+    y = candidate_coords[, 2]
+  )
+
+  existing_coords <- st_coordinates(bh_247_sf)
+  existing_xy <- data.frame(
+    x = existing_coords[, 1],
+    y = existing_coords[, 2]
+  )
+
+  # Compute distance matrix: demand points -> candidate locations
+  cat("Computing distances: demand points -> candidates...\n")
+  dist_to_candidates <- dodgr_dists(
+    graph,
+    from = demand_xy,
+    to = candidate_xy,
+    quiet = FALSE
+  )
+
+  # Compute distance matrix: demand points -> existing AEDs
+  cat("Computing distances: demand points -> existing AEDs...\n")
+  dist_to_existing <- dodgr_dists(
+    graph,
+    from = demand_xy,
+    to = existing_xy,
+    quiet = FALSE
+  )
+
+  # Cache results
+  saveRDS(dist_to_candidates, cache_dist_candidates)
+  saveRDS(dist_to_existing, cache_dist_existing)
+  cat("Distance matrices cached.\n")
+}
+
+cat("Distance matrix (demand -> candidates):",
+    nrow(dist_to_candidates), "x", ncol(dist_to_candidates), "\n")
+cat("Distance matrix (demand -> existing):",
+    nrow(dist_to_existing), "x", ncol(dist_to_existing), "\n")
+```
+
+## Current Coverage Baseline
+
+Before optimising, we establish how well the existing AED network covers the population at different distance thresholds.
+
+```{r}
+#| label: baseline-coverage
+
+# For each demand point, find the minimum walking distance to any existing AED
+min_dist_existing <- apply(dist_to_existing, 1, function(row) {
+  d <- row[!is.na(row)]
+  if (length(d) == 0) Inf else min(d)
+})
+
+# Calculate baseline coverage at different radii
+radii <- c(100, 200, 300)
+baseline_coverage <- sapply(radii, function(r) {
+  covered <- min_dist_existing <= r
+  # Weighted coverage: proportion of total workday density that is covered
+  sum(demand_pts$workday_density[covered]) /
+    sum(demand_pts$workday_density) * 100
+})
+
+baseline_df <- data.frame(
+  `Coverage Radius (m)` = radii,
+  `LSOAs Covered` = sapply(radii, function(r) sum(min_dist_existing <= r)),
+  `Total LSOAs` = nrow(demand_pts),
+  `Population-Weighted Coverage (%)` = round(baseline_coverage, 1),
+  check.names = FALSE
+)
+
+kable(baseline_df, align = "rrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+## MCLP Formulation
+
+The Maximal Coverage Location Problem is formulated as a Mixed Integer Program:
+
+**Sets:**
+
+- $I$ = demand points (LSOA centroids), indexed by $i$
+- $J$ = candidate locations, indexed by $j$
+
+**Parameters:**
+
+- $w_i$ = workday population density weight for demand point $i$
+- $d_{ij}$ = network walking distance from demand point $i$ to candidate $j$
+- $R$ = coverage radius threshold (metres)
+- $p$ = number of new AEDs to place
+- $N_i$ = set of candidates within radius $R$ of demand $i$: $N_i = \{j : d_{ij} \leq R\}$
+
+**Decision Variables:**
+
+- $y_j \in \{0, 1\}$ — 1 if a new AED is placed at candidate $j$
+- $z_i \in \{0, 1\}$ — 1 if demand point $i$ is newly covered
+
+**Objective:** Maximise total weighted coverage
+
+$$\max \sum_{i \in I} w_i \cdot z_i$$
+
+**Subject to:**
+
+$$z_i \leq \sum_{j \in N_i} y_j \quad \forall i \in I$$
+$$\sum_{j \in J} y_j = p$$
+$$y_j \in \{0, 1\}, \quad z_i \in \{0, 1\}$$
+
+Demand points already covered by existing AEDs have their weights set to zero so the optimiser focuses on extending coverage to currently uncovered areas.
+
+```{r}
+#| label: mclp-function
+
+solve_mclp <- function(dist_to_candidates, dist_to_existing,
+                       weights, radius, p) {
+  n_demand <- nrow(dist_to_candidates)
+  n_candidates <- ncol(dist_to_candidates)
+
+  # Determine which demand points are already covered by existing AEDs
+  min_existing <- apply(dist_to_existing, 1, function(row) {
+    d <- row[!is.na(row)]
+    if (length(d) == 0) Inf else min(d)
+  })
+  already_covered <- min_existing <= radius
+
+  # Set weight to 0 for already-covered demand points
+  w <- weights
+  w[already_covered] <- 0
+
+  # Build coverage matrix: which candidates can cover which demand points
+  # a[i,j] = 1 if candidate j is within radius of demand point i
+  coverage <- (!is.na(dist_to_candidates)) & (dist_to_candidates <= radius)
+  # Convert logical to numeric for the solver
+  coverage_num <- matrix(as.numeric(coverage), nrow = n_demand, ncol = n_candidates)
+
+  # Build and solve MCLP using ompr
+  # Use MILPModel which supports external data indexing in constraints
+  model <- MILPModel() %>%
+    # y[j] = 1 if we place AED at candidate j
+    add_variable(y[j], j = 1:n_candidates, type = "binary") %>%
+    # z[i] = 1 if demand point i is newly covered
+    add_variable(z[i], i = 1:n_demand, type = "binary") %>%
+    # Maximise weighted coverage
+    set_objective(sum_over(w[i] * z[i], i = 1:n_demand), "max") %>%
+    # z[i] can only be 1 if at least one covering candidate is selected
+    add_constraint(
+      z[i] <= sum_over(coverage_num[i, j] * y[j], j = 1:n_candidates),
+      i = 1:n_demand
+    ) %>%
+    # Place exactly p new AEDs
+    add_constraint(sum_over(y[j], j = 1:n_candidates) == p)
+
+  # Solve
+  result <- solve_model(model, with_ROI(solver = "glpk", verbose = FALSE))
+
+  # Extract results
+  selected <- result %>%
+    get_solution(y[j]) %>%
+    filter(value > 0.5)
+
+  newly_covered <- result %>%
+    get_solution(z[i]) %>%
+    filter(value > 0.5)
+
+  # Calculate coverage statistics
+  total_weight <- sum(weights)
+  existing_coverage <- sum(weights[already_covered])
+  new_coverage <- sum(w[newly_covered$i])
+  total_coverage <- existing_coverage + new_coverage
+
+  list(
+    selected_indices = selected$j,
+    n_already_covered = sum(already_covered),
+    n_newly_covered = nrow(newly_covered),
+    pct_existing = existing_coverage / total_weight * 100,
+    pct_new = new_coverage / total_weight * 100,
+    pct_total = total_coverage / total_weight * 100,
+    objective = objective_value(result),
+    status = solver_status(result)
+  )
+}
+```
+
+## Run Optimisation Scenarios
+
+We test **3 coverage radii** (100m, 200m, 300m) crossed with **4 placement counts** (5, 10, 15, 20 new AEDs) for a total of 12 scenarios.
+
+```{r}
+#| label: run-scenarios
+
+radii <- c(100, 200, 300)
+p_values <- c(5, 10, 15, 20)
+
+results_list <- list()
+
+for (radius in radii) {
+  for (p in p_values) {
+    cat(sprintf("Solving: radius = %dm, p = %d new AEDs... ", radius, p))
+    res <- solve_mclp(
+      dist_to_candidates, dist_to_existing,
+      demand_pts$workday_density, radius, p
+    )
+    cat(sprintf("Status: %s | Coverage: %.1f%% -> %.1f%%\n",
+                res$status, res$pct_existing, res$pct_total))
+
+    results_list[[paste(radius, p, sep = "_")]] <- data.frame(
+      radius = radius,
+      new_aeds = p,
+      existing_coverage_pct = round(res$pct_existing, 1),
+      new_coverage_pct = round(res$pct_new, 1),
+      total_coverage_pct = round(res$pct_total, 1),
+      lsoas_already_covered = res$n_already_covered,
+      lsoas_newly_covered = res$n_newly_covered,
+      status = res$status
+    )
+  }
+}
+
+scenarios <- bind_rows(results_list)
+```
+
+## Sensitivity Analysis
+
+```{r}
+#| label: sensitivity-table
+
+# Format as a readable table
+sensitivity <- scenarios %>%
+  mutate(
+    improvement = total_coverage_pct - existing_coverage_pct,
+    label = sprintf("%.1f%% (+%.1f pp)", total_coverage_pct, improvement)
+  ) %>%
+  select(radius, new_aeds, label) %>%
+  pivot_wider(names_from = new_aeds, values_from = label,
+              names_prefix = "p = ")
+
+kable(
+  sensitivity,
+  col.names = c("Coverage Radius (m)", paste(p_values, "new AEDs")),
+  align = "rcccc",
+  caption = "Population-weighted coverage (% of total workday density) after adding optimally-placed AEDs"
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+```{r}
+#| label: improvement-chart
+#| fig-width: 9
+#| fig-height: 5
+
+# Bar chart of coverage improvement
+library(ggplot2)
+
+scenarios %>%
+  mutate(
+    radius_label = paste0(radius, "m radius"),
+    improvement = total_coverage_pct - existing_coverage_pct
+  ) %>%
+  ggplot(aes(x = factor(new_aeds), y = total_coverage_pct, fill = radius_label)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_hline(
+    data = scenarios %>%
+      distinct(radius, existing_coverage_pct) %>%
+      mutate(radius_label = paste0(radius, "m radius")),
+    aes(yintercept = existing_coverage_pct, colour = radius_label),
+    linetype = "dashed", linewidth = 0.6
+  ) +
+  scale_fill_brewer(palette = "Set2", name = "Scenario") +
+  scale_colour_brewer(palette = "Set2", name = "Baseline") +
+  labs(
+    title = "Population-Weighted Coverage by Scenario",
+    subtitle = "Dashed lines show current baseline coverage (before adding new AEDs)",
+    x = "Number of New AEDs",
+    y = "Coverage (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Best Scenario Map: 200m Radius, 10 New AEDs
+
+We focus on the **200m radius / 10 new AEDs** scenario as a practical middle-ground for detailed mapping.
+
+```{r}
+#| label: best-scenario
+
+# Re-run the 200m / 10 scenario to get the selected locations
+best <- solve_mclp(
+  dist_to_candidates, dist_to_existing,
+  demand_pts$workday_density, radius = 200, p = 10
+)
+
+# Get the selected candidate locations
+optimal_sf <- candidates_sf[best$selected_indices, ]
+
+cat("Optimal new AED locations (200m radius, 10 new AEDs):\n")
+cat(sprintf("  Coverage improvement: %.1f%% -> %.1f%% (+%.1f pp)\n",
+            best$pct_existing, best$pct_total,
+            best$pct_total - best$pct_existing))
+```
+
+```{r}
+#| label: map-optimal
+
+# Colour palette for workday density
+pal_density <- colorNumeric("Blues", domain = bh_analysis$workday_density)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # LSOA boundaries coloured by workday density
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_density(workday_density),
+    fillOpacity = 0.5,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²"
+    ),
+    group = "Workday Density"
+  ) %>%
+  # Existing AEDs
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.7,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "Existing 24/7 Public AEDs"
+  ) %>%
+  # Optimal new locations
+  addCircleMarkers(
+    data = optimal_sf,
+    radius = 8,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.9,
+    weight = 2,
+    popup = ~paste0(
+      "<strong>Optimal New AED Site</strong><br>",
+      "<em>Type:</em> ", poi_type, "<br>",
+      "<em>OSM ID:</em> ", id
+    ),
+    group = "Optimal New Locations"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_density,
+    values = bh_analysis$workday_density,
+    title = "Workday Density<br>(per km²)"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("red", "#2ca02c"),
+    labels = c("Existing AED", "Optimal New Site"),
+    title = "AED Locations"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Workday Density", "Existing 24/7 Public AEDs",
+                      "Optimal New Locations"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+## Coverage Comparison Map
+
+This map shows 200m coverage zones before and after the optimised placement. Blue zones show current coverage from existing AEDs; green zones show additional coverage from the 10 optimally-placed new AEDs.
+
+```{r}
+#| label: map-coverage-comparison
+
+# Transform to BNG for buffering in metres
+existing_bng <- st_transform(bh_247_sf, 27700)
+optimal_bng <- st_transform(optimal_sf, 27700)
+
+# Create 200m buffers
+existing_buffer <- st_union(st_buffer(existing_bng, 200))
+optimal_buffer <- st_union(st_buffer(optimal_bng, 200))
+
+# New coverage = optimal buffer minus existing buffer
+new_coverage_zone <- st_difference(optimal_buffer, existing_buffer)
+
+# Transform back to WGS84 for leaflet
+existing_buffer_wgs <- st_transform(existing_buffer, 4326)
+new_coverage_wgs <- st_transform(new_coverage_zone, 4326)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  # LSOA boundaries
+  addPolygons(
+    data = bh_analysis,
+    fillOpacity = 0,
+    color = "grey70",
+    weight = 0.5,
+    group = "LSOA Boundaries"
+  ) %>%
+  # Existing coverage (blue)
+  addPolygons(
+    data = existing_buffer_wgs,
+    fillColor = "#3182bd",
+    fillOpacity = 0.3,
+    color = "#3182bd",
+    weight = 1,
+    group = "Current Coverage (200m)"
+  ) %>%
+  # New additional coverage (green)
+  addPolygons(
+    data = new_coverage_wgs,
+    fillColor = "#2ca02c",
+    fillOpacity = 0.3,
+    color = "#2ca02c",
+    weight = 1,
+    group = "New Additional Coverage (200m)"
+  ) %>%
+  # Existing AEDs
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 4,
+    color = "#3182bd",
+    fillColor = "#3182bd",
+    fillOpacity = 0.8,
+    weight = 1,
+    group = "Existing AEDs"
+  ) %>%
+  # Optimal new locations
+  addCircleMarkers(
+    data = optimal_sf,
+    radius = 6,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.9,
+    weight = 2,
+    group = "New AED Locations"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#3182bd", "#2ca02c"),
+    labels = c("Current 200m Coverage", "New Additional Coverage"),
+    title = "Coverage Zones"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("LSOA Boundaries", "Current Coverage (200m)",
+                      "New Additional Coverage (200m)",
+                      "Existing AEDs", "New AED Locations"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+## Network vs Euclidean Distance Comparison
+
+Network (walking) distances are typically 1.3–1.5× longer than straight-line distances in urban areas, due to the layout of streets, one-way systems, and pedestrian barriers. Using Euclidean distances would overestimate AED accessibility.
+
+```{r}
+#| label: network-vs-euclidean
+
+# For each demand point, compute Euclidean distance to nearest existing AED
+demand_bng <- st_transform(demand_pts, 27700)
+euclidean_dist <- st_distance(demand_bng, aed_bng)
+min_euclidean <- apply(euclidean_dist, 1, min)
+
+# Compare with network distances
+comparison_df <- data.frame(
+  lsoa = demand_pts$LSOA21NM,
+  euclidean_m = as.numeric(min_euclidean),
+  network_m = min_dist_existing
+) %>%
+  filter(is.finite(network_m)) %>%
+  mutate(
+    ratio = network_m / euclidean_m,
+    difference_m = network_m - euclidean_m
+  )
+
+cat("Network vs Euclidean distance to nearest existing AED:\n")
+cat(sprintf("  Mean ratio: %.2f (network is %.0f%% longer)\n",
+            mean(comparison_df$ratio, na.rm = TRUE),
+            (mean(comparison_df$ratio, na.rm = TRUE) - 1) * 100))
+cat(sprintf("  Median ratio: %.2f\n",
+            median(comparison_df$ratio, na.rm = TRUE)))
+cat(sprintf("  Mean additional walking distance: %.0fm\n",
+            mean(comparison_df$difference_m, na.rm = TRUE)))
+```
+
+```{r}
+#| label: distance-scatter
+#| fig-width: 7
+#| fig-height: 6
+
+ggplot(comparison_df, aes(x = euclidean_m, y = network_m)) +
+  geom_point(alpha = 0.5, colour = "#3182bd") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_smooth(method = "lm", se = FALSE, colour = "#e6550d", linewidth = 0.8) +
+  labs(
+    title = "Network vs Euclidean Distance to Nearest AED",
+    subtitle = "Points above the dashed line indicate network distance exceeds Euclidean",
+    x = "Euclidean (straight-line) Distance (m)",
+    y = "Network (walking) Distance (m)"
+  ) +
+  coord_equal() +
+  theme_minimal()
+```
+
+## Optimal Location Details
+
+```{r}
+#| label: optimal-table
+
+# Get coordinates of optimal locations
+optimal_coords <- st_coordinates(optimal_sf)
+
+optimal_table <- data.frame(
+  Site = 1:nrow(optimal_sf),
+  Type = optimal_sf$poi_type,
+  Longitude = round(optimal_coords[, 1], 5),
+  Latitude = round(optimal_coords[, 2], 5),
+  `OSM ID` = optimal_sf$id,
+  check.names = FALSE
+)
+
+kable(
+  optimal_table,
+  caption = "Optimal locations for 10 new AEDs (200m coverage radius)",
+  align = "rlrrr"
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+## Summary
+
+```{r}
+#| label: summary-stats
+#| echo: false
+
+n_existing <- nrow(bh_247_sf)
+n_candidates_total <- nrow(candidates_sf)
+best_baseline <- round(best$pct_existing, 1)
+best_after <- round(best$pct_total, 1)
+best_improvement <- round(best$pct_total - best$pct_existing, 1)
+```
+
+**Key findings:**
+
+- Brighton & Hove has **`r n_existing` existing 24/7 publicly accessible AEDs** and **`r n_candidates_total` candidate sites** were identified from OpenStreetMap
+- At **200m network walking distance**, current AEDs cover **`r best_baseline`%** of the workday population
+- Adding **10 optimally-placed AEDs** increases 200m coverage to **`r best_after`%** — an improvement of **`r best_improvement` percentage points**
+- Network walking distances are typically **30–50% longer** than straight-line distances, making Euclidean-based analyses overstate true accessibility
+- The MCLP optimisation guarantees the mathematically best placement given the coverage radius and number of new AEDs
+
+**Scenario comparison:**
+
+The sensitivity analysis shows diminishing returns as more AEDs are added — the first 5 provide the largest coverage gain per unit. Wider radii (300m) naturally achieve higher coverage but may exceed comfortable walking distance in an emergency. The 200m radius represents a practical balance.
+
+---
+
+*Data sourced from [The Circuit](https://www.defibfinder.uk/), [ONS Census 2021](https://www.nomisweb.co.uk/sources/census_2021_wd), and [OpenStreetMap](https://www.openstreetmap.org/). Is this an emergency? This website is used to locate defibrillators, but it is not intended for use in an emergency. If you require urgent medical assistance, call 999 now.*

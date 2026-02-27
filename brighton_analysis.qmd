@@ -1220,7 +1220,17 @@ leaflet() %>%
     fillOpacity = 0.7,
     color = "black",
     weight = 2,
-    popup = ~paste0("<strong>", LSOA21NM, "</strong><br>Tier: ", tier),
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Tier:</em> <strong>", tier, "</strong><br>",
+      "<em>Combined rank:</em> ", combined_priority_rank, "<br>",
+      "<em>Workday rank:</em> ", priority_rank,
+      " | <em>Resident rank:</em> ", resident_priority_rank, "<br>",
+      "<hr style='margin:4px 0'>",
+      "<em>Workday density:</em> ", format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>Resident density:</em> ", format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
     group = "Top 15 Priority LSOAs"
   ) %>%
   

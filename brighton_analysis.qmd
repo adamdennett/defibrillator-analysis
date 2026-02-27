@@ -1,7 +1,10 @@
 ---
 title: "Brighton & Hove: Defibrillator Provision vs. Daytime & Resident Population Demand"
 author: "Adam Dennett"
-format: html
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
 execute:
   warning: false
   message: false
@@ -1206,11 +1209,7 @@ leaflet() %>%
     fillOpacity = 0.3,
     color = "grey70",
     weight = 0.5,
-    popup = ~paste0(
-      "<strong>", LSOA21NM, "</strong><br>",
-      "<em>Combined rank:</em> ", combined_priority_rank,
-      " of ", nrow(bh_analysis)
-    ),
+    popup = ~paste0("<strong>", LSOA21NM, "</strong>"),
     group = "Other LSOAs"
   ) %>%
   
@@ -1221,17 +1220,7 @@ leaflet() %>%
     fillOpacity = 0.7,
     color = "black",
     weight = 2,
-    popup = ~paste0(
-      "<strong>", LSOA21NM, "</strong><br>",
-      "<em>Tier:</em> <strong>", tier, "</strong><br>",
-      "<em>Combined rank:</em> ", combined_priority_rank, "<br>",
-      "<em>Workday rank:</em> ", priority_rank,
-      " | <em>Resident rank:</em> ", resident_priority_rank, "<br>",
-      "<hr style='margin:4px 0'>",
-      "<em>Workday density:</em> ", format(round(workday_density), big.mark = ","), " per km²<br>",
-      "<em>Resident density:</em> ", format(round(resident_density), big.mark = ","), " per km²<br>",
-      "<em>24/7 Public AEDs:</em> ", aed_count
-    ),
+    popup = ~paste0("<strong>", LSOA21NM, "</strong><br>Tier: ", tier),
     group = "Top 15 Priority LSOAs"
   ) %>%
   
@@ -1243,13 +1232,10 @@ leaflet() %>%
     fillColor = "white",
     fillOpacity = 0.9,
     weight = 1.5,
-    popup = ~paste0(
-      "<strong>", location_name, "</strong><br>",
-      address_line1, "<br>",
-      address_city, " ", address_post_code
-    ),
     group = "24/7 Public AEDs"
   ) %>%
+
+  # Points: Telephone Boxes
   addCircleMarkers(
     data = phone_sf,
     radius = 5,
@@ -1257,14 +1243,11 @@ leaflet() %>%
     fillColor = "#2ca02c",
     fillOpacity = 0.8,
     weight = 1,
-    popup = ~paste0(
-      "<strong>Telephone Box</strong><br>",
-      "<em>OSM ID:</em> ", id
-    ),
-    group = "Telephone Boxes (OSM)"
+    popup = ~paste0("<strong>Telephone Box</strong>"),
+    group = "Telephone Boxes (OSM)" # This name must match the one below
   ) %>%
   
-  # Legend and Controls
+  # Legend
   addLegend(
     position = "bottomright",
     pal = pal,
@@ -1272,8 +1255,15 @@ leaflet() %>%
     title = "Priority Tier",
     opacity = 0.7
   ) %>%
+
+  # UPDATED: Added "Telephone Boxes (OSM)" to the overlayGroups
   addLayersControl(
-    overlayGroups = c("Top 15 Priority LSOAs", "Other LSOAs", "24/7 Public AEDs"),
+    overlayGroups = c(
+      "Top 15 Priority LSOAs", 
+      "Other LSOAs", 
+      "24/7 Public AEDs", 
+      "Telephone Boxes (OSM)"
+    ),
     options = layersControlOptions(collapsed = FALSE)
   )
 ```

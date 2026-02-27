@@ -1,5 +1,5 @@
 ---
-title: "Brighton & Hove: Defibrillator Provision vs. Daytime Demand"
+title: "Brighton & Hove: Defibrillator Provision vs. Daytime & Resident Population Demand"
 author: "Adam Dennett"
 format: html
 execute:
@@ -9,14 +9,20 @@ execute:
 
 ## Introduction
 
-This analysis compares the current provision of **24/7 publicly accessible** Automated External Defibrillators (AEDs) in Brighton & Hove against estimated daytime population demand. Using Census 2021 workday population density at Lower Super Output Area (LSOA) level as a proxy for where people are during the day, we identify areas with high demand but low defibrillator coverage — and rank them by priority for new AED placement.
+This analysis compares the current provision of **24/7 publicly accessible** Automated External Defibrillators (AEDs) in Brighton & Hove against two complementary measures of population demand:
+
+1.  **Workday population density** (Census 2021, table WD001) — a proxy for where people are during the daytime
+2.  **Resident population density** (Census 2021, table TS001) — the usual resident population, reflecting overnight and evening demand
+
+By examining both perspectives, we can identify areas with high demand but low defibrillator coverage and understand how priority rankings shift depending on whether we consider daytime or residential populations.
 
 **Data sources:**
 
-- AED locations from [The Circuit](https://www.defibfinder.uk/) (February 2026 extract)
-- Census 2021 Workday Population Density (table WD001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_wd)
-- LSOA 2021 boundaries (BGC V5, Generalised Clipped) from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
-- Telephone box locations from [OpenStreetMap](https://www.openstreetmap.org/) via the Overpass API
+-   AED locations from [The Circuit](https://www.defibfinder.uk/) (February 2026 extract)
+-   Census 2021 Workday Population Density (table WD001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_wd)
+-   Census 2021 Usual Resident Population (table TS001) from [Nomis](https://www.nomisweb.co.uk/sources/census_2021_bulk)
+-   LSOA 2021 boundaries (BGC V5, Generalised Clipped) from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/)
+-   Telephone box locations from [OpenStreetMap](https://www.openstreetmap.org/) via the Overpass API
 
 ## Load Libraries
 
@@ -37,6 +43,7 @@ library(htmltools)
 library(knitr)
 library(kableExtra)
 library(jsonlite)
+library(ggplot2)
 ```
 
 ## Load and Filter Defibrillator Data
@@ -148,6 +155,44 @@ cat("Range:", round(min(bh_wd001$workday_density)),
     "persons per km²\n")
 ```
 
+### Census 2021 Usual Resident Population (TS001)
+
+```{r}
+#| label: download-ts001
+#| message: false
+
+# Download TS001 (usual resident population) from Nomis Census 2021 bulk data
+tmp_zip_ts <- tempfile(fileext = ".zip")
+download.file("https://www.nomisweb.co.uk/output/census/2021/census2021-ts001.zip",
+              tmp_zip_ts, quiet = TRUE, mode = "wb")
+
+# Extract to a dedicated subdirectory to avoid file conflicts
+tmp_dir_ts <- file.path(tempdir(), "ts001")
+dir.create(tmp_dir_ts, showWarnings = FALSE)
+unzip(tmp_zip_ts, exdir = tmp_dir_ts)
+
+# Find the LSOA-level CSV
+ts_files <- list.files(tmp_dir_ts, pattern = "\\.csv$",
+                        full.names = TRUE, recursive = TRUE)
+ts001_file <- ts_files[grep("lsoa", ts_files, ignore.case = TRUE)][1]
+
+ts001_raw <- read_csv(ts001_file, show_col_types = FALSE)
+
+# Identify columns flexibly (Census 2021 bulk CSVs vary in naming)
+code_col <- names(ts001_raw)[grep("geography.code|Areas.Code|LSOA.*Code",
+                                   names(ts001_raw), ignore.case = TRUE)][1]
+total_col <- names(ts001_raw)[grep("Total|Usual.resident",
+                                    names(ts001_raw), ignore.case = TRUE)][1]
+
+bh_ts001 <- ts001_raw %>%
+  select(lsoa21cd = all_of(code_col),
+         resident_pop = all_of(total_col)) %>%
+  filter(lsoa21cd %in% bh_lsoa$LSOA21CD)
+
+cat("Resident population data for", nrow(bh_ts001), "Brighton & Hove LSOAs\n")
+cat("Total usual residents:", format(sum(bh_ts001$resident_pop), big.mark = ","), "\n")
+```
+
 ### OpenStreetMap Telephone Box Locations
 
 Telephone boxes are potential sites for new defibrillator installations — many across the UK have already been converted. We download current telephone box locations from [OpenStreetMap](https://www.openstreetmap.org/) via the Overpass API (`amenity=telephone`).
@@ -199,7 +244,9 @@ cat("LSOAs with zero 24/7 public AEDs:",
     sum(bh_analysis$aed_count == 0), "of", nrow(bh_analysis), "\n")
 ```
 
-## Map 1: Workday Population Demand with AED Locations
+## Workday Population Analysis
+
+### Map 1: Workday Population Demand with AED Locations
 
 This map shows the Census 2021 workday population density across Brighton & Hove LSOAs. Darker shading indicates higher concentrations of people during the working day. Red points show the locations of existing 24/7 publicly accessible defibrillators.
 
@@ -236,7 +283,7 @@ tm_shape(bh_analysis) +
   tm_scalebar(position = c("left", "bottom"))
 ```
 
-## Map 2: Interactive Demand & Provision Map
+### Map 2: Interactive Workday Demand & Provision Map
 
 Zoom in to explore individual LSOAs and AED locations. Click on LSOAs for workday population data, or on red markers for AED details.
 
@@ -291,7 +338,7 @@ leaflet() %>%
   )
 ```
 
-## Map 3: Coverage Gap — Priority Areas for New AEDs
+### Map 3: Workday Coverage Gap — Priority Areas for New AEDs
 
 The priority score is calculated as: **workday population density ÷ (number of existing 24/7 public AEDs + 1)**. A higher score indicates an LSOA with high daytime demand but few or no defibrillators — and therefore greater need for new provision.
 
@@ -355,9 +402,9 @@ leaflet() %>%
   )
 ```
 
-## Priority Ranking Table
+### Workday Priority Ranking Table
 
-The table below ranks all Brighton & Hove LSOAs by priority for new 24/7 public defibrillator placement. LSOAs with high workday population density but few or no existing AEDs are ranked highest.
+The table below ranks all Brighton & Hove LSOAs by priority for new 24/7 public defibrillator placement based on **workday population density**.
 
 ```{r}
 #| label: priority-table
@@ -387,7 +434,7 @@ priority_table %>%
   row_spec(0, bold = TRUE)
 ```
 
-### Full Ranking — Interactive Map
+### Full Workday Ranking — Interactive Map
 
 This map shows all LSOAs coloured by priority rank (darker red = higher priority), with existing 24/7 public AED locations (red markers) and OpenStreetMap telephone box locations (green markers). Telephone boxes represent potential sites for new defibrillator installations.
 
@@ -471,7 +518,7 @@ leaflet() %>%
   )
 ```
 
-### Full Ranking Table
+### Full Workday Ranking Table
 
 ```{r}
 #| label: full-table
@@ -484,6 +531,753 @@ priority_table %>%
   scroll_box(height = "400px")
 ```
 
+## Resident Population Analysis
+
+The workday population captures where people are during the day, but cardiac arrests can happen at any time. The **usual resident population** from Census 2021 (table TS001) provides a complementary perspective — reflecting where people live, sleep, and spend evenings and weekends. Comparing the two measures reveals whether AED provision aligns with both daytime and residential demand.
+
+### Build Resident Population Dataset
+
+```{r}
+#| label: build-resident-dataset
+
+# Calculate LSOA area in km² using BNG projection for accurate measurement
+bh_analysis_bng <- st_transform(bh_analysis, 27700)
+bh_analysis$area_km2 <- as.numeric(st_area(bh_analysis_bng)) / 1e6
+
+# Join resident population to the analysis dataset
+bh_analysis <- bh_analysis %>%
+  left_join(bh_ts001, by = c("LSOA21CD" = "lsoa21cd")) %>%
+  mutate(
+    resident_density = resident_pop / area_km2,
+    # Priority score: higher resident density with fewer AEDs = higher priority
+    resident_priority_score = resident_density / (aed_count + 1),
+    resident_priority_rank = rank(-resident_priority_score, ties.method = "first")
+  )
+
+cat("Resident population density range:",
+    format(round(min(bh_analysis$resident_density, na.rm = TRUE)), big.mark = ","),
+    "to",
+    format(round(max(bh_analysis$resident_density, na.rm = TRUE)), big.mark = ","),
+    "persons per km²\n")
+
+cat("LSOAs with zero 24/7 public AEDs:",
+    sum(bh_analysis$aed_count == 0), "of", nrow(bh_analysis), "\n")
+```
+
+### Map 4: Resident Population Density with AED Locations
+
+This map shows the Census 2021 usual resident population density across Brighton & Hove LSOAs. Darker shading indicates more densely populated residential areas. Red points show the locations of existing 24/7 publicly accessible defibrillators.
+
+```{r}
+#| label: map-resident-demand
+#| fig-width: 10
+#| fig-height: 8
+
+tmap_mode("plot")
+
+tm_shape(bh_analysis) +
+  tm_polygons(
+    fill = "resident_density",
+    fill.scale = tm_scale_continuous(
+      values = "brewer.purples"
+    ),
+    fill.legend = tm_legend(
+      title = "Resident Pop.\nDensity\n(per km²)"
+    ),
+    col = "grey60",
+    lwd = 0.5
+  ) +
+  tm_shape(bh_247_sf) +
+  tm_symbols(
+    fill = "red",
+    col = "darkred",
+    size = 0.3,
+    shape = 21
+  ) +
+  tm_title("Resident Population Density & 24/7 Public AED Locations") +
+  tm_layout(
+    frame = FALSE
+  ) +
+  tm_scalebar(position = c("left", "bottom"))
+```
+
+### Map 5: Interactive Resident Population & AED Provision Map
+
+Zoom in to explore resident population density by LSOA. Click on LSOAs for population data, or on red markers for AED details.
+
+```{r}
+#| label: map-resident-interactive
+
+# Create colour palette for resident density
+pal_resident <- colorNumeric("Purples",
+                              domain = bh_analysis$resident_density)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_resident(resident_density),
+    fillOpacity = 0.6,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Usual residents:</em> ",
+      format(resident_pop, big.mark = ","), "<br>",
+      "<em>Resident density:</em> ",
+      format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count, "<br>",
+      "<em>Resident priority rank:</em> ",
+      resident_priority_rank, " of ", nrow(bh_analysis)
+    ),
+    group = "Resident Density"
+  ) %>%
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_resident,
+    values = bh_analysis$resident_density,
+    title = "Resident Density<br>(per km²)"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Resident Density", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+### Map 6: Resident Population Coverage Gap — Priority Areas
+
+The resident priority score is calculated as: **resident population density ÷ (number of existing 24/7 public AEDs + 1)**. LSOAs outlined in purple are the **top 20 priority** areas based on resident population demand.
+
+```{r}
+#| label: map-resident-priority
+
+bh_analysis <- bh_analysis %>%
+  mutate(resident_top20 = resident_priority_rank <= 20)
+
+# Colour palette for resident priority score
+pal_res_priority <- colorNumeric("YlOrRd",
+                                  domain = bh_analysis$resident_priority_score)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_res_priority(resident_priority_score),
+    fillOpacity = 0.6,
+    color = ~ifelse(resident_top20, "purple", "grey50"),
+    weight = ~ifelse(resident_top20, 3, 1),
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Resident priority rank:</em> <strong>",
+      resident_priority_rank,
+      "</strong> of ", nrow(bh_analysis), "<br>",
+      "<em>Resident priority score:</em> ",
+      format(round(resident_priority_score), big.mark = ","), "<br>",
+      "<em>Resident density:</em> ",
+      format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>Usual residents:</em> ",
+      format(resident_pop, big.mark = ","), "<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Resident Priority"
+  ) %>%
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 4,
+    color = "black",
+    fillColor = "white",
+    fillOpacity = 0.9,
+    weight = 1.5,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_res_priority,
+    values = bh_analysis$resident_priority_score,
+    title = "Resident Priority<br>Score"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Resident Priority", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+### Resident Population Priority Ranking Table
+
+The table below ranks all Brighton & Hove LSOAs by priority for new AED placement based on **usual resident population density**.
+
+```{r}
+#| label: resident-priority-table
+
+resident_priority_table <- bh_analysis %>%
+  st_drop_geometry() %>%
+  select(
+    Rank = resident_priority_rank,
+    LSOA = LSOA21NM,
+    `Usual Residents` = resident_pop,
+    `Resident Density (per km²)` = resident_density,
+    `24/7 Public AEDs` = aed_count,
+    `Priority Score` = resident_priority_score
+  ) %>%
+  arrange(Rank) %>%
+  mutate(
+    `Usual Residents` = format(`Usual Residents`, big.mark = ","),
+    `Resident Density (per km²)` = format(round(`Resident Density (per km²)`),
+                                            big.mark = ","),
+    `Priority Score` = format(round(`Priority Score`), big.mark = ",")
+  )
+
+# Show top 20
+resident_priority_table %>%
+  head(20) %>%
+  kable(align = c("r", "l", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Full Resident Ranking Table
+
+```{r}
+#| label: full-resident-table
+
+resident_priority_table %>%
+  kable(align = c("r", "l", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE) %>%
+  scroll_box(height = "400px")
+```
+
+### Full Resident Ranking — Interactive Map
+
+This map shows all LSOAs coloured by resident population priority rank (darker purple = higher priority), with existing 24/7 public AED locations (red markers) and OpenStreetMap telephone box locations (green markers).
+
+```{r}
+#| label: map-resident-full-ranking
+
+# Colour palette: rank 1 = darkest, highest rank = lightest
+pal_res_rank <- colorNumeric(
+  palette = "Purples",
+  domain = bh_analysis$resident_priority_rank,
+  reverse = TRUE
+)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_res_rank(resident_priority_rank),
+    fillOpacity = 0.5,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Resident priority rank:</em> <strong>",
+      resident_priority_rank,
+      "</strong> of ", nrow(bh_analysis), "<br>",
+      "<em>Resident priority score:</em> ",
+      format(round(resident_priority_score), big.mark = ","), "<br>",
+      "<em>Resident density:</em> ",
+      format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>Usual residents:</em> ",
+      format(resident_pop, big.mark = ","), "<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Resident Priority Ranking"
+  ) %>%
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addCircleMarkers(
+    data = phone_sf,
+    radius = 5,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>Telephone Box</strong><br>",
+      "<em>OSM ID:</em> ", id
+    ),
+    group = "Telephone Boxes (OSM)"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_res_rank,
+    values = bh_analysis$resident_priority_rank,
+    title = "Resident<br>Priority Rank",
+    labFormat = labelFormat(transform = function(x) round(x))
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("red", "#2ca02c"),
+    labels = c("24/7 Public AED", "Telephone Box"),
+    title = "Points"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Resident Priority Ranking", "24/7 Public AEDs",
+                      "Telephone Boxes (OSM)"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+## Comparing Workday and Resident Population Demand
+
+Different population measures can lead to different conclusions about where AEDs are most needed. The workday population reflects daytime demand (offices, shops, transport hubs), while the resident population reflects overnight, evening, and weekend demand (homes, residential streets). Comparing the two reveals which areas are consistently high-priority and which shift depending on the measure used.
+
+### Density Comparison
+
+```{r}
+#| label: density-scatter
+#| fig-width: 8
+#| fig-height: 7
+
+comparison_df <- bh_analysis %>%
+  st_drop_geometry() %>%
+  select(LSOA21NM, workday_density, resident_density, aed_count,
+         priority_rank, resident_priority_rank)
+
+ggplot(comparison_df,
+       aes(x = workday_density, y = resident_density)) +
+  geom_point(aes(colour = factor(pmin(aed_count, 3))),
+             size = 2.5, alpha = 0.7) +
+  geom_abline(intercept = 0, slope = 1,
+              linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(
+    values = c("0" = "#d73027", "1" = "#fee08b",
+               "2" = "#91cf60", "3" = "#1a9850"),
+    labels = c("0" = "0", "1" = "1", "2" = "2", "3" = "3+"),
+    name = "24/7 Public\nAEDs"
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Workday vs. Resident Population Density by LSOA",
+    subtitle = "Points above the diagonal have higher resident than workday density",
+    x = "Workday Population Density (per km²)",
+    y = "Resident Population Density (per km²)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+LSOAs above the dashed line have higher resident density than workday density — predominantly residential areas. LSOAs below the line attract more people during the day than they house — commercial, retail, or transport hubs. Red points (no AEDs) in either high-density zone indicate gaps in coverage.
+
+### Priority Rank Differences
+
+The table below shows LSOAs where the priority ranking changes most between the two measures. A large positive rank difference means the LSOA is ranked as much higher priority by the **resident** analysis than the workday analysis (i.e. it is a densely populated residential area that is less busy during the day). A large negative difference means the reverse — a daytime hotspot that is less densely populated residentially.
+
+```{r}
+#| label: rank-change-table
+
+rank_changes <- bh_analysis %>%
+  st_drop_geometry() %>%
+  mutate(
+    rank_diff = priority_rank - resident_priority_rank
+  ) %>%
+  select(
+    LSOA = LSOA21NM,
+    `Workday Rank` = priority_rank,
+    `Resident Rank` = resident_priority_rank,
+    `Rank Difference` = rank_diff,
+    `Workday Density` = workday_density,
+    `Resident Density` = resident_density,
+    `24/7 Public AEDs` = aed_count
+  ) %>%
+  arrange(desc(abs(`Rank Difference`)))
+
+# Show top 20 largest rank changes
+rank_changes %>%
+  head(20) %>%
+  mutate(
+    `Workday Density` = format(round(`Workday Density`), big.mark = ","),
+    `Resident Density` = format(round(`Resident Density`), big.mark = ",")
+  ) %>%
+  kable(align = c("l", "r", "r", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Map 7: Priority Rank Differences
+
+This map visualises how priority rankings shift between the two population measures. **Blue** LSOAs are ranked as higher priority under the **workday** analysis (daytime hotspots); **red** LSOAs are ranked as higher priority under the **resident** analysis (residential demand). Neutral colours indicate consistent priority under both measures.
+
+```{r}
+#| label: map-rank-diff
+
+bh_analysis <- bh_analysis %>%
+  mutate(rank_diff = priority_rank - resident_priority_rank)
+
+# Diverging palette: blue = workday priority higher, red = resident priority higher
+max_abs_diff <- max(abs(bh_analysis$rank_diff), na.rm = TRUE)
+pal_diff <- colorNumeric(
+  palette = "RdBu",
+  domain = c(-max_abs_diff, max_abs_diff),
+  reverse = TRUE
+)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_diff(rank_diff),
+    fillOpacity = 0.6,
+    color = "grey50",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Workday priority rank:</em> ", priority_rank, "<br>",
+      "<em>Resident priority rank:</em> ", resident_priority_rank, "<br>",
+      "<em>Rank difference:</em> <strong>",
+      ifelse(rank_diff > 0, paste0("+", rank_diff), rank_diff),
+      "</strong><br>",
+      "<hr style='margin:4px 0'>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>Resident density:</em> ",
+      format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Rank Difference"
+  ) %>%
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 4,
+    color = "black",
+    fillColor = "white",
+    fillOpacity = 0.9,
+    weight = 1.5,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_diff,
+    values = bh_analysis$rank_diff,
+    title = "Rank Difference<br>(Workday − Resident)",
+    labFormat = labelFormat(
+      transform = function(x) round(x)
+    )
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Rank Difference", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+### Map 8: Combined Workday & Resident Priority Ranking
+
+This map combines both population measures into a single priority ranking by averaging the workday and resident priority ranks. This gives equal weight to daytime and residential demand, producing a balanced view of where new AEDs are most needed across all times of day. Darker shading indicates higher combined priority. LSOAs outlined in red are the **top 20** under the combined ranking.
+
+```{r}
+#| label: map-combined-ranking
+
+# Compute combined priority: average of the two ranks (lower = higher priority)
+bh_analysis <- bh_analysis %>%
+  mutate(
+    combined_avg_rank = (priority_rank + resident_priority_rank) / 2,
+    combined_priority_rank = rank(combined_avg_rank, ties.method = "first"),
+    combined_top20 = combined_priority_rank <= 20
+  )
+
+# Colour palette: rank 1 = darkest
+pal_combined <- colorNumeric(
+  palette = "YlOrRd",
+  domain = bh_analysis$combined_priority_rank,
+  reverse = TRUE
+)
+
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = bh_analysis,
+    fillColor = ~pal_combined(combined_priority_rank),
+    fillOpacity = 0.5,
+    color = ~ifelse(combined_top20, "red", "grey50"),
+    weight = ~ifelse(combined_top20, 3, 1),
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Combined priority rank:</em> <strong>",
+      combined_priority_rank,
+      "</strong> of ", nrow(bh_analysis), "<br>",
+      "<em>Workday rank:</em> ", priority_rank,
+      " | <em>Resident rank:</em> ", resident_priority_rank, "<br>",
+      "<hr style='margin:4px 0'>",
+      "<em>Workday density:</em> ",
+      format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>Resident density:</em> ",
+      format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Combined Priority"
+  ) %>%
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 5,
+    color = "darkred",
+    fillColor = "red",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addCircleMarkers(
+    data = phone_sf,
+    radius = 5,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>Telephone Box</strong><br>",
+      "<em>OSM ID:</em> ", id
+    ),
+    group = "Telephone Boxes (OSM)"
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal_combined,
+    values = bh_analysis$combined_priority_rank,
+    title = "Combined<br>Priority Rank",
+    labFormat = labelFormat(transform = function(x) round(x))
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("red", "#2ca02c"),
+    labels = c("24/7 Public AED", "Telephone Box"),
+    title = "Points"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Combined Priority", "24/7 Public AEDs",
+                      "Telephone Boxes (OSM)"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+### Combined Priority Ranking Table
+
+```{r}
+#| label: combined-priority-table
+
+combined_table <- bh_analysis %>%
+  st_drop_geometry() %>%
+  select(
+    `Combined Rank` = combined_priority_rank,
+    LSOA = LSOA21NM,
+    `Workday Rank` = priority_rank,
+    `Resident Rank` = resident_priority_rank,
+    `Workday Density` = workday_density,
+    `Resident Density` = resident_density,
+    `24/7 Public AEDs` = aed_count
+  ) %>%
+  arrange(`Combined Rank`) %>%
+  mutate(
+    `Workday Density` = format(round(`Workday Density`), big.mark = ","),
+    `Resident Density` = format(round(`Resident Density`), big.mark = ",")
+  )
+
+combined_table %>%
+  head(20) %>%
+  kable(align = c("r", "l", "r", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Consistently High-Priority LSOAs
+
+LSOAs that rank in the **top 20 under both** workday and resident population analyses represent the most robust candidates for new AED placement — they have high demand regardless of which population measure is used.
+
+```{r}
+#| label: consistent-priority
+
+consistent_top <- bh_analysis %>%
+  st_drop_geometry() %>%
+  filter(priority_rank <= 20, resident_priority_rank <= 20) %>%
+  select(
+    LSOA = LSOA21NM,
+    `Workday Rank` = priority_rank,
+    `Resident Rank` = resident_priority_rank,
+    `Workday Density` = workday_density,
+    `Resident Density` = resident_density,
+    `24/7 Public AEDs` = aed_count
+  ) %>%
+  arrange(`Workday Rank`) %>%
+  mutate(
+    `Workday Density` = format(round(`Workday Density`), big.mark = ","),
+    `Resident Density` = format(round(`Resident Density`), big.mark = ",")
+  )
+
+n_consistent <- nrow(consistent_top)
+
+cat(n_consistent, "LSOAs appear in the top 20 under both measures:\n\n")
+
+consistent_top %>%
+  kable(align = c("l", "r", "r", "r", "r", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Map 9: Top 15 Consistently High-Priority LSOAs
+
+The map below highlights the top 15 LSOAs from the combined priority ranking that also appear in the top 20 under **both** the workday and resident analyses. These are grouped into three tiers to help identify the most urgent candidates for new AED provision.
+
+
+```{r}
+library(leaflet)
+library(dplyr)
+
+# 1. DATA PREPARATION
+# Ensure top15 is created correctly in the current session
+bh_analysis <- bh_analysis %>%
+  mutate(consistent = priority_rank <= 20 & resident_priority_rank <= 20)
+
+top15 <- bh_analysis %>%
+  filter(consistent) %>%
+  arrange(combined_priority_rank) %>%
+  head(15) %>%
+  mutate(
+    tier = case_when(
+      row_number() <= 5  ~ "Top 5",
+      row_number() <= 10 ~ "6th–10th",
+      TRUE               ~ "11th–15th"
+    ),
+    tier = factor(tier, levels = c("Top 5", "6th–10th", "11th–15th"))
+  )
+
+bg_lsoas <- bh_analysis %>% filter(!LSOA21CD %in% top15$LSOA21CD)
+
+# 2. COLOR PALETTE
+# Using ColorBrewer-style "YlOrRd" logic for a clear heat fade
+pal <- colorFactor(
+  palette = c("#d7191c", "#fdae61", "#ffffbf"), 
+  levels = c("Top 5", "6th–10th", "11th–15th")
+)
+
+# 3. MAP GENERATION
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  
+  # Background: All other LSOAs
+  addPolygons(
+    data = bg_lsoas,
+    fillColor = "#e0e0e0",
+    fillOpacity = 0.3,
+    color = "grey70",
+    weight = 0.5,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Combined rank:</em> ", combined_priority_rank,
+      " of ", nrow(bh_analysis)
+    ),
+    group = "Other LSOAs"
+  ) %>%
+  
+  # Foreground: Top 15 Priority LSOAs
+  addPolygons(
+    data = top15,
+    fillColor = ~pal(tier),
+    fillOpacity = 0.7,
+    color = "black",
+    weight = 2,
+    popup = ~paste0(
+      "<strong>", LSOA21NM, "</strong><br>",
+      "<em>Tier:</em> <strong>", tier, "</strong><br>",
+      "<em>Combined rank:</em> ", combined_priority_rank, "<br>",
+      "<em>Workday rank:</em> ", priority_rank,
+      " | <em>Resident rank:</em> ", resident_priority_rank, "<br>",
+      "<hr style='margin:4px 0'>",
+      "<em>Workday density:</em> ", format(round(workday_density), big.mark = ","), " per km²<br>",
+      "<em>Resident density:</em> ", format(round(resident_density), big.mark = ","), " per km²<br>",
+      "<em>24/7 Public AEDs:</em> ", aed_count
+    ),
+    group = "Top 15 Priority LSOAs"
+  ) %>%
+  
+  # Points: 24/7 Public AEDs
+  addCircleMarkers(
+    data = bh_247_sf,
+    radius = 4,
+    color = "black",
+    fillColor = "white",
+    fillOpacity = 0.9,
+    weight = 1.5,
+    popup = ~paste0(
+      "<strong>", location_name, "</strong><br>",
+      address_line1, "<br>",
+      address_city, " ", address_post_code
+    ),
+    group = "24/7 Public AEDs"
+  ) %>%
+  addCircleMarkers(
+    data = phone_sf,
+    radius = 5,
+    color = "darkgreen",
+    fillColor = "#2ca02c",
+    fillOpacity = 0.8,
+    weight = 1,
+    popup = ~paste0(
+      "<strong>Telephone Box</strong><br>",
+      "<em>OSM ID:</em> ", id
+    ),
+    group = "Telephone Boxes (OSM)"
+  ) %>%
+  
+  # Legend and Controls
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = top15$tier,
+    title = "Priority Tier",
+    opacity = 0.7
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Top 15 Priority LSOAs", "Other LSOAs", "24/7 Public AEDs"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
 ## Summary
 
 ```{r}
@@ -493,16 +1287,25 @@ priority_table %>%
 n_total <- nrow(bh_analysis)
 n_zero <- sum(bh_analysis$aed_count == 0)
 n_aeds <- nrow(bh_247_sf)
-top1 <- bh_analysis %>% filter(priority_rank == 1) %>% st_drop_geometry()
+top1_wd <- bh_analysis %>% filter(priority_rank == 1) %>% st_drop_geometry()
+top1_res <- bh_analysis %>% filter(resident_priority_rank == 1) %>% st_drop_geometry()
+n_consistent <- bh_analysis %>%
+  st_drop_geometry() %>%
+  filter(priority_rank <= 20, resident_priority_rank <= 20) %>%
+  nrow()
+total_residents <- sum(bh_analysis$resident_pop, na.rm = TRUE)
 ```
 
 **Key findings:**
 
-- Brighton & Hove has **`r n_total` LSOAs** and **`r n_aeds` 24/7 publicly accessible AEDs**
-- **`r n_zero` LSOAs (`r round(100 * n_zero / n_total)`%)** have **no** 24/7 public AED
-- The highest-priority LSOA for new provision is **`r top1$LSOA21NM`** with a workday population density of `r format(round(top1$workday_density), big.mark = ",")` persons per km² and `r top1$aed_count` existing 24/7 public AED(s)
-- The priority ranking combines both demand (workday population density) and existing supply, meaning LSOAs that already have good coverage are ranked lower regardless of their density
+-   Brighton & Hove has **`r n_total` LSOAs**, **`r format(total_residents, big.mark = ",")` usual residents**, and **`r n_aeds` 24/7 publicly accessible AEDs**
+-   **`r n_zero` LSOAs (`r round(100 * n_zero / n_total)`%)** have **no** 24/7 public AED
+-   **Workday analysis:** The highest-priority LSOA is **`r top1_wd$LSOA21NM`** with a workday density of `r format(round(top1_wd$workday_density), big.mark = ",")` persons per km² and `r top1_wd$aed_count` existing 24/7 public AED(s)
+-   **Resident analysis:** The highest-priority LSOA is **`r top1_res$LSOA21NM`** with a resident density of `r format(round(top1_res$resident_density), big.mark = ",")` persons per km² and `r top1_res$aed_count` existing 24/7 public AED(s)
+-   **`r n_consistent` LSOAs** appear in the top 20 priority under **both** workday and resident population measures — these are the strongest candidates for new AED provision
+-   The priority ranking combines both demand (population density) and existing supply, meaning LSOAs that already have good coverage are ranked lower regardless of their density
+-   Areas where the two rankings diverge most highlight the difference between daytime commercial centres and densely populated residential neighbourhoods
 
----
+------------------------------------------------------------------------
 
-*Data sourced from [The Circuit](https://www.defibfinder.uk/) and [ONS Census 2021](https://www.nomisweb.co.uk/sources/census_2021_wd). Is this an emergency? This website is used to locate defibrillators, but it is not intended for use in an emergency. If you require urgent medical assistance, call 999 now.*
+*Data sourced from [The Circuit](https://www.defibfinder.uk/), [ONS Census 2021 Workday Population](https://www.nomisweb.co.uk/sources/census_2021_wd), and [ONS Census 2021 Usual Resident Population](https://www.nomisweb.co.uk/sources/census_2021_bulk). Is this an emergency? This website is used to locate defibrillators, but it is not intended for use in an emergency. If you require urgent medical assistance, call 999 now.*

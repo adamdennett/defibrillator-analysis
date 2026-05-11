@@ -2,7 +2,7 @@
 title: "Defibrillator coverage in Brighton & Hove"
 description: "Mapping where publicly registered AEDs are, who they reach, and where additional coverage would do most good — including a Maximum Coverage Location Problem allocation."
 site: brighton_analysis.html
-image: docs/brighton_analysis_files/figure-html/map-demand-1.png
+image: https://github.com/adamdennett/defibrillator-analysis/blob/main/docs/brighton_analysis_files/figure-html/map-demand-1.png
 ---
 
 # Defibrillator coverage in Brighton & Hove

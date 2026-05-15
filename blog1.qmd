@@ -1,0 +1,26 @@
+---
+title: "A short writeup on mapping Brighton's AEDs"
+description: "A nice little side-quest"
+date: 2026-05-20
+image: thumb.png   # relative path in the repo, or a full URL
+---
+
+A friend of mine who works for the council asked if I knew of any useful methods for helping them decide where best to site new defibrillators in the city. They'd received some cash for locating some new defibrilators in the city, and wanted to do something that was a little better than randomly guessing or listening to those who shouted loudest. 
+
+A perfect little spatial analysis side quest - so I agreed to help. A very quick delve into the literature suggested that defibrillators were more usefully located in areas of high daytime footfall - essentially where people work rather than where they live. 
+
+This was interesting as it sounded like there was some pressure to site defibrillators in residential areas with low coverage, but from the brief research carried out, this appeared to be a sub-optimal strategy. 
+
+So I went about digging up the best day-time population data I could lay my hands on. In the absence of mobile phone data or other highly granular representations of where people tend to be in the day in Brighton (also recognising tourist footfall is an important consideration, but as far as I'm aware, not easily measurable without something like mobile phone traces), I settled on Census based work-day population estimates. 
+
+Then, after digging around a bit, I found a national online database of defibrillator locations. It appears there is not one single source of truth here, but data from https://www.defibfinder.uk/ seemed more complete than other datasets like OpenStreetMap
+
+The analysis carried out was pretty simple - and for this sort of thing, simple is probably what you are looking for. So I generated a simple defibrillator / day-time population density analysis at the lowest level of geography I could lay my hands on - LSOA. 
+
+Of course there are always going to be boundary issues with this sort of thing, but LSOAs are relatively small, so this kind of issue is less of a big worry. 
+
+This density analysis then revealed some clear not-spots and hot-spots for further investigation. I was told that old phone boxes made pretty good sites for defibs, so also plotted these on a map as well. 
+
+A few clear candidates popped out - especially when, for completeness, my friend asked if I could also look at residential populations. So I did. The one location that really stuck out for me was Seven Dials - an area with both high daytime and residential night-time populations and a clear lack of defibrillator coverage. Some other areas popped out and for fun, I set Claude on having a go at something more sophisticated. Which it did, but to be honest, the basic analysis did a reasonable job. 
+
+Test blog over!

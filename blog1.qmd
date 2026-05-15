@@ -2,7 +2,7 @@
 title: "A short writeup on mapping Brighton's AEDs"
 description: "A nice little side-quest"
 date: 2026-05-20
-image: thumb.png   # relative path in the repo, or a full URL
+image: docs/brighton_analysis_files/figure-html/map-priority-1.png   # relative path in the repo, or a full URL
 ---
 
 A friend of mine who works for the council asked if I knew of any useful methods for helping them decide where best to site new defibrillators in the city. They'd received some cash for locating some new defibrilators in the city, and wanted to do something that was a little better than randomly guessing or listening to those who shouted loudest. 

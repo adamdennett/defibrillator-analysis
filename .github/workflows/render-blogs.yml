@@ -4,9 +4,6 @@ name: Render blog posts
 # can be authored directly in github.com's web editor without needing
 # a local R / Quarto setup. The site adamdennett.co.uk's Blog page
 # discovers the rendered output on its next render.
-#
-# Doesn't touch the bigger project qmds (brighton_analysis.qmd etc.)
-# because we render single files, not the whole project.
 
 on:
   push:
@@ -22,7 +19,6 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    # Skip when the commit was our own auto-render (avoids loops).
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     steps:
       - uses: actions/checkout@v4
@@ -37,16 +33,31 @@ jobs:
             quarto render "$f"
             echo "::endgroup::"
           done
+          echo "::group::After render — what's in docs/"
+          ls -la docs/ 2>/dev/null | head -20 || echo "(no docs dir)"
+          echo "::endgroup::"
+          echo "::group::Specifically docs/blog*"
+          ls -la docs/blog* 2>/dev/null || echo "(no blog files in docs/)"
+          echo "::endgroup::"
 
       - name: Commit rendered HTML
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Stage whatever quarto produced for blog files
-          git add docs/blog*.html docs/blog*_files 2>/dev/null || true
+          echo "::group::git status before add"
+          git status --short
+          echo "::endgroup::"
+          # Use find rather than shell glob for robustness
+          find docs -maxdepth 2 \( -name 'blog*.html' -o -name 'blog*_files' \) -print 2>/dev/null | while read f; do
+            echo "adding: $f"
+            git add "$f"
+          done
+          echo "::group::git status after add"
+          git status --short
+          echo "::endgroup::"
           if ! git diff --staged --quiet; then
             git commit -m "Auto-render blog posts [skip ci]"
             git push
           else
-            echo "No changes to commit."
+            echo "Nothing staged — nothing to commit."
           fi

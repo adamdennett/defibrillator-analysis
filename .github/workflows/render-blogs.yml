@@ -1,15 +1,12 @@
 name: Render blog posts
 
-# Auto-renders any blog*.qmd at the repo root to docs/, so blog posts
-# can be authored directly in github.com's web editor without needing
-# a local R / Quarto setup. The site adamdennett.co.uk's Blog page
-# discovers the rendered output on its next render.
-
 on:
   push:
     branches: [main]
     paths:
       - 'blog*.qmd'
+      - '_blog-style.css'
+      - '_blog-format.yml'
       - '.github/workflows/render-blogs.yml'
   workflow_dispatch:
 
@@ -30,31 +27,24 @@ jobs:
           shopt -s nullglob
           for f in blog*.qmd; do
             echo "::group::Rendering $f"
-            quarto render "$f"
+            # --metadata-file applies _blog-format.yml on top of the qmd's
+            # own front-matter, so blog posts pick up the site styling
+            # without affecting any other qmd in the project.
+            quarto render "$f" --metadata-file _blog-format.yml
             echo "::endgroup::"
           done
-          echo "::group::After render — what's in docs/"
-          ls -la docs/ 2>/dev/null | head -20 || echo "(no docs dir)"
-          echo "::endgroup::"
-          echo "::group::Specifically docs/blog*"
-          ls -la docs/blog* 2>/dev/null || echo "(no blog files in docs/)"
-          echo "::endgroup::"
 
-      - name: Commit rendered HTML
+      - name: Commit rendered HTML + style assets
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          echo "::group::git status before add"
-          git status --short
-          echo "::endgroup::"
-          # Use find rather than shell glob for robustness
-          find docs -maxdepth 2 \( -name 'blog*.html' -o -name 'blog*_files' \) -print 2>/dev/null | while read f; do
-            echo "adding: $f"
+          # Stage the rendered HTML, any _files dir Quarto created, AND
+          # the CSS that Quarto copied alongside (so Pages serves it).
+          find docs -maxdepth 3 \
+            \( -name 'blog*.html' -o -name 'blog*_files' -o -name '_blog-style.css' \) \
+            -print 2>/dev/null | while read f; do
             git add "$f"
           done
-          echo "::group::git status after add"
-          git status --short
-          echo "::endgroup::"
           if ! git diff --staged --quiet; then
             git commit -m "Auto-render blog posts [skip ci]"
             git push

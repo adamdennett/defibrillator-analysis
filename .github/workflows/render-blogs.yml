@@ -1,0 +1,52 @@
+name: Render blog posts
+
+# Auto-renders any blog*.qmd at the repo root to docs/, so blog posts
+# can be authored directly in github.com's web editor without needing
+# a local R / Quarto setup. The site adamdennett.co.uk's Blog page
+# discovers the rendered output on its next render.
+#
+# Doesn't touch the bigger project qmds (brighton_analysis.qmd etc.)
+# because we render single files, not the whole project.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'blog*.qmd'
+      - '.github/workflows/render-blogs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    # Skip when the commit was our own auto-render (avoids loops).
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Render every blog*.qmd
+        run: |
+          shopt -s nullglob
+          for f in blog*.qmd; do
+            echo "::group::Rendering $f"
+            quarto render "$f"
+            echo "::endgroup::"
+          done
+
+      - name: Commit rendered HTML
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Stage whatever quarto produced for blog files
+          git add docs/blog*.html docs/blog*_files 2>/dev/null || true
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto-render blog posts [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
